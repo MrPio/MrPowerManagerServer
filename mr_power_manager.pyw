@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import ctypes
 import json
 import math
@@ -13,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from threading import Thread
 
+import cv2
+import ffmpeg
+import numpy as np
 import polling2
 import psutil
 import pyautogui
@@ -27,9 +31,11 @@ import win32security
 import wmi
 from GPUtil import GPUtil
 from comtypes import CLSCTX_ALL
+from cv2 import VideoCapture, imshow, waitKey, destroyWindow
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 from dropbox_api import list_files
+from PIL import Image
 
 # ===========================================================================================
 # ===========================================================================================
@@ -154,6 +160,12 @@ class StompClient(object):
 
 UPDATE_STATUS = 1
 CLIENT_OFFLINE = 3
+STREAMING_SPEED = 0.5
+WEBCAM_SPEED = 0.5
+STREAMING_QUALITY = 15
+WEBCAM_QUALITY = 30
+STREAMING_TIMEOUT = 12
+BYTES_LIMIT = 14000
 REQUEST_AVAILABLE_COMMANDS = 2
 web = "https://mrpowermanager.herokuapp.com"
 
@@ -179,6 +191,8 @@ is_locked = False
 is_locked_last = datetime(2000, month=1, day=1)
 encrypted_pass = ''
 last_client_online = datetime(2000, 1, 1)
+last_streaming_start = datetime(2000, 1, 1)
+last_webcam_start = datetime(2000, 1, 1)
 wattage_entries = []
 thread_get_commands_online = True
 
@@ -197,6 +211,10 @@ stomp_client = StompClient(None)
 
 collect_wattage_in_background = True
 client_online = False
+
+base64Screen = ''
+base64Webcam=''
+cam = ''
 
 
 async def work_offline():
@@ -236,6 +254,7 @@ def is_client_online():
     while True:
         if force_exit:
             return
+
         if list_files("/database/clients").__contains__(token + ".user"):
             if not client_online:
                 print('client è andato ONLINE!')
@@ -247,6 +266,7 @@ def is_client_online():
                 print('client è andato offline!')
             client_online = False
             time.sleep(3)
+
 
 def start_up_commands():
     if request_available_commands().status_code == 200:
@@ -266,12 +286,107 @@ def start_up_commands():
                         command['commandScheduledDate']))
 
 
-offline_thread = Thread(target=work_offline)
+def screen_to_base64():
+    global base64Screen
+    path = userpaths.get_local_appdata() + '\MrPowerManager\screen'
+    pyautogui.screenshot().save(path,
+                                "JPEG",
+                                optimize=True,
+                                quality=int(STREAMING_QUALITY))
+    with open(path, "rb") as image_file:
+        base64Screen = base64.b64encode(image_file.read()).decode("utf-8")
+
+
+def webcam_to_base64():
+    global base64Webcam
+    result, image = cam.read()
+    if result:
+        path = userpaths.get_local_appdata() + '\MrPowerManager\webcam'
+        Image.fromarray(image).save(path,
+                                    "JPEG",
+                                    optimize=True,
+                                    quality=int(WEBCAM_QUALITY))
+        with open(path, "rb") as image_file:
+            base64Webcam = base64.b64encode(image_file.read()).decode("utf-8")
+    else:
+        base64Webcam=''
+
+
+def record_screen(fps='30', duration='5', quality='25', h265='True'):
+    codec = 'libx265' if h265.__str__().lower() == 'true' else 'libx264'
+    path = userpaths.get_desktop() + '\\' + datetime.now().strftime("%Y-%m-%d %H-%M-%S") + '.mkv'
+    process2 = (
+        ffmpeg
+            .input('pipe:')
+            .filter('fps', fps=fps, round='up')
+            .output(path, vcodec=codec, crf=quality, video_track_timescale='420000')
+            .overwrite_output()
+            .run_async(pipe_stdin=True)
+    )
+    now = datetime.now()
+
+    while (datetime.now() - now).seconds <= int(duration):
+        img = pyautogui.screenshot()
+        img = np.array(img)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        _, encoded_image = cv2.imencode('.jpg', img)
+        # Write the frame into the file 'output.avi'
+        process2.stdin.write(
+            encoded_image
+                .astype(np.uint8)
+                .tobytes()
+        )
+
+def send_base64(data,header):
+    max = int(len(data) / BYTES_LIMIT)
+    for i in range(max + 1):
+        if len(data) > BYTES_LIMIT:
+            msg = header+'@@@' + str(i) + '@@@' + str(max) + '@@@' + data[:BYTES_LIMIT]
+        else:
+            msg = header+'@@@' + str(i) + '@@@' + str(max) + '@@@' + data
+
+        if len(list(data)) > BYTES_LIMIT:
+            data = data[BYTES_LIMIT:]
+        stomp = stomper.send(dest="/app/sendMessage/" + token + "/" + pcName, msg=msg)
+        stomp_client.ws.send(stomp)
+
+def streaming():
+    global base64Screen
+    print('STREAMING started...')
+    screen_to_base64()
+    while True:
+        if (datetime.now() - last_streaming_start).seconds > STREAMING_TIMEOUT:
+            print('STREAMING stopped...')
+            time.sleep(2)
+        else:
+            Thread(target=screen_to_base64).start()
+            send_base64(base64Screen,'STREAMING')
+
+        time.sleep(STREAMING_SPEED)
+
+def webcam():
+    global base64Webcam,cam
+    print('WEBCAM started...')
+    if type(cam)==str and cam=='':
+        cam = VideoCapture(0)
+    webcam_to_base64()
+    while True:
+        if (datetime.now() - last_webcam_start).seconds > STREAMING_TIMEOUT:
+            print('WEBCAM stopped...')
+            time.sleep(2)
+        else:
+            Thread(target=webcam_to_base64).start()
+            send_base64(base64Webcam,'WEBCAM')
+
+        time.sleep(WEBCAM_SPEED)
+
+
 check_client_online_thread = Thread(target=is_client_online)
+streaming_thread = Thread(target=streaming)
+webcam_thread = Thread(target=webcam)
 
 
 async def update_status():
-    # offline_thread.start()
     asyncio.create_task(work_offline())
 
     print('avvio check_client_online_thread()...')
@@ -385,7 +500,7 @@ def get_wattage_data():
     battery_perc = battery.percent
     battery_plugged = battery.power_plugged
 
-    global battery_charge_rate, battery_discharge_rate,batteries
+    global battery_charge_rate, battery_discharge_rate, batteries
     batteries = t.ExecQuery('Select * from BatteryStatus where Voltage > 0')
     _, b = list(enumerate(batteries))[0]
     battery_charge_rate = b.ChargeRate
@@ -688,7 +803,8 @@ def run_at(wait, command):
 
 def execute_command(command):
     #   TODO both date should be utc
-    print("command found! ---> " + command.command)
+    global last_streaming_start,last_webcam_start
+    # print("command found! ---> " + command.command)
     if command.is_scheduled:
         secs = int((datetime.utcnow() - command.scheduleDate).total_seconds())
         print(" need to wait " + str(secs) + "sec")
@@ -746,14 +862,64 @@ def execute_command(command):
         fernet = FernetCipher(str.encode(command.command.split('@@@@@@@@@@@@')[2]))
         pyautogui.write(fernet.decrypt(encrypted_pass))
     elif "SHARE_CLIPBOARD" in command.command:
-        val=command.command.split('@@@@@@@@@@@@')[1]
-        if val!='null':
+        val = command.command.split('@@@@@@@@@@@@')[1]
+        if val != 'null':
             pyperclip.copy(val)
+    elif "KEYBOARD" in command.command:
+        to_hold = list(filter(None, command.command.split('@@@')[1].split(':')))
+        print('to_hold=' + str(to_hold))
 
+        if (len(to_hold) == 0):
+            pyautogui.hotkey(command.command.split('@@@')[2])
+        if (len(to_hold) == 1):
+            pyautogui.hotkey(to_hold[0], command.command.split('@@@')[2])
+        if (len(to_hold) == 2):
+            pyautogui.hotkey(to_hold[0], to_hold[1], command.command.split('@@@')[2])
+        if (len(to_hold) == 3):
+            pyautogui.hotkey(to_hold[0], to_hold[1], to_hold[2], command.command.split('@@@')[2])
+        # for key in to_hold:
+        #     pyautogui.keyDown(key)
+        #     pyautogui.sleep(0.01)
+        # print('to_press=' + command.command.split('@@@')[2])
+        # pyautogui.press()
+        # for key in to_hold:
+        #     pyautogui.keyUp(key)
+    elif "SCREENSHOOT" in command.command:
+        pyautogui.screenshot().save("screenshoot",
+                                    "JPEG",
+                                    optimize=True,
+                                    quality=10)
 
+    elif "STREAMING_START" in command.command:
+        if (not streaming_thread.is_alive()):
+            streaming_thread.start()
+        last_streaming_start = datetime.now()
+    elif "STREAMING_STOP" in command.command:
+        last_streaming_start = datetime(2000, 1, 1)
+    elif "STREAMING_SPEED" in command.command:
+        global STREAMING_SPEED
+        STREAMING_SPEED = 2 - 1.70 * 0.01 * float(command.command.split('@@@')[1])
+    elif "STREAMING_QUALITY" in command.command:
+        global STREAMING_QUALITY
+        STREAMING_QUALITY = 10 + 70 * 0.01 * float(command.command.split('@@@')[1])
+        print('quality=' + str(STREAMING_QUALITY))
 
+    elif "RECORD_SECONDS" in command.command:
+        args = command.command.split('@@@')
+        Thread(target=record_screen, args=args[1:]).start()
 
-
+    elif "WEBCAM_START" in command.command:
+        if not webcam_thread.is_alive():
+            webcam_thread.start()
+        last_webcam_start = datetime.now()
+    elif "WEBCAM_STOP" in command.command:
+        last_webcam_start = datetime(2000, 1, 1)
+    elif "WEBCAM_SPEED" in command.command:
+        global WEBCAM_SPEED
+        WEBCAM_SPEED = 1.0 - 0.97 * 0.01 * float(command.command.split('@@@')[1])
+    elif "WEBCAM_QUALITY" in command.command:
+        global WEBCAM_QUALITY
+        WEBCAM_QUALITY = 3 + 70 * 0.01 * float(command.command.split('@@@')[1])
 
 def execute_commands():
     for command in commands:
@@ -871,7 +1037,8 @@ def initialize_and_go():
     check_sored_data_or_validate()
 
     StompClient.DESTINATIONS = [
-        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_', pcName) + "/commands"
+        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
+                                                                           pcName) + "/commands"
     ]
 
     devices = AudioUtilities.GetSpeakers()
@@ -915,9 +1082,11 @@ def print_battery_status():
 
 
 if __name__ == '__main__':
-    try:
-        initialize_and_go()
+    initialize_and_go()
 
-    except Exception as e:
-        print("errore catturato! ", e)
-# pyperclip.copy('myPass')
+    # cam = VideoCapture(0)
+    # webcam_to_base64()
+
+
+# except Exception as e:
+#     print("errore catturato! ", e)

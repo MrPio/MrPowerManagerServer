@@ -25,13 +25,14 @@ dbx = dropbox.Dropbox(app_key=get_app_key(), app_secret=get_app_secret(), oauth2
 
 def list_files(path):
     files_list = []
+
     try:
         files = dbx.files_list_folder(path).entries
         for file in files:
             if isinstance(file, dropbox.files.FileMetadata):
                 files_list.append(file.name)
-    except:
-        pass
+    except Exception as e:
+        print(e)
     return files_list
 
 
