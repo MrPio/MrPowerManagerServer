@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import sched
+import threading
 import time
 from asyncio import sleep
 from ctypes import cast, POINTER
@@ -20,6 +21,7 @@ import numpy as np
 import polling2
 import psutil
 import pyautogui
+import pygame
 import pyperclip
 import requests
 import screen_brightness_control
@@ -30,20 +32,22 @@ import win32api
 import win32security
 import wmi
 from GPUtil import GPUtil
-from comtypes import CLSCTX_ALL
-from cv2 import VideoCapture, imshow, waitKey, destroyWindow
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-
-from dropbox_api import list_files
 from PIL import Image
-
-# ===========================================================================================
-# ===========================================================================================
+from comtypes import CLSCTX_ALL
+from cv2 import VideoCapture
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 # ws_uri = "ws://localhost:5000/chat/websocket"
 from fernet import FernetCipher
 
+# ===========================================================================================
+# ===========================================================================================
+
 ws_uri = "ws://mrpowermanager.herokuapp.com/chat/websocket"
+# ws_uri = "ws://localhost:5000/chat/websocket"
+
+message = ''
+its_me_who_is_sending_message=False
 
 
 class StompClient(object):
@@ -70,6 +74,8 @@ class StompClient(object):
         else:
             self.headers = {}
         self.ws = None
+
+    pygame_mix_started = False
 
     @staticmethod
     def on_open(ws):
@@ -121,6 +127,15 @@ class StompClient(object):
         """
         self.NOTIFICATIONS.put(msg)
 
+    def go_offline(self):
+        global client_online
+        while (datetime.now() - last_client_online).seconds < 20:
+            if not client_online:
+                return
+            time.sleep(3)
+        print('il cliente non si è fatto più sentire... concludo che è andato offline!')
+        client_online = False
+
     def on_msg(self, c, msg):
         """
         Handler for receiving a message.
@@ -131,12 +146,44 @@ class StompClient(object):
         unpacked_msg = stomper.Frame.unpack(frame, msg)
         if len(unpacked_msg['body']) > 1:
             command = dict(json.loads(unpacked_msg['body']))
-            print(str(command))
             if 'command' in command.keys():
                 command = Command(
                     command['command'], int(command['id']), int(command['commandValue']),
                     command['commandScheduledDate'])
                 execute_command(command)
+            elif 'message' in command.keys():
+                if its_me_who_is_sending_message:
+                    return
+                global message
+                max = int(command['message'].split('@@@')[2])
+                index = int(command['message'].split('@@@')[1])
+                if (index == 0):
+                    message = ''
+                message += command['message'].split('@@@')[3]
+                if (index == max):
+                    print('gonna reproduce audio')
+                    decode_string = base64.b64decode(message)
+                    path = userpaths.get_local_appdata() + '\MrPowerManager\\rec ' + datetime.now().strftime(
+                        "%Y-%m-%d %H-%M-%S") + '.mp3'
+                    open(path, "wb").write(decode_string)
+                    if (not self.pygame_mix_started):
+                        pygame.mixer.init()
+                        self.pygame_mix_started = True
+                    # pygame.mixer.music.stop()
+                    pygame.mixer.music.load(path)
+                    pygame.mixer.music.play()
+            elif 'online' in command.keys():
+                global last_client_online, client_online
+                if str(command['online']).lower() == 'true':
+                    last_client_online = datetime.now()
+                    if not client_online:
+                        print('client è andato ONLINE!')
+                        client_online = True
+                        Thread(target=self.go_offline).start()
+                else:
+                    if client_online:
+                        print('client è andato offline!')
+                    client_online = False
 
     def on_error(self, err, b):
         """
@@ -160,8 +207,8 @@ class StompClient(object):
 
 UPDATE_STATUS = 1
 CLIENT_OFFLINE = 3
-STREAMING_SPEED = 0.5
-WEBCAM_SPEED = 0.5
+STREAMING_SPEED = 0.4
+WEBCAM_SPEED = 0.1
 STREAMING_QUALITY = 15
 WEBCAM_QUALITY = 30
 STREAMING_TIMEOUT = 12
@@ -213,7 +260,7 @@ collect_wattage_in_background = True
 client_online = False
 
 base64Screen = ''
-base64Webcam=''
+base64Webcam = ''
 cam = ''
 
 
@@ -249,23 +296,24 @@ async def work_offline():
             return
 
 
-def is_client_online():
-    global last_client_online, client_online
-    while True:
-        if force_exit:
-            return
-
-        if list_files("/database/clients").__contains__(token + ".user"):
-            if not client_online:
-                print('client è andato ONLINE!')
-            client_online = True
-            last_client_online = datetime.now()
-            time.sleep(12)
-        else:
-            if client_online:
-                print('client è andato offline!')
-            client_online = False
-            time.sleep(3)
+# def is_client_online():
+#     global last_client_online, client_online
+#     while True:
+#         if force_exit:
+#             return
+#
+#         # TODO if list_files("/database/clients").__contains__(token + ".user"):
+#         if True:
+#             if not client_online:
+#                 print('client è andato ONLINE!')
+#             client_online = True
+#             last_client_online = datetime.now()
+#             time.sleep(12)
+#         else:
+#             if client_online:
+#                 print('client è andato offline!')
+#             client_online = False
+#             time.sleep(3)
 
 
 def start_up_commands():
@@ -309,7 +357,7 @@ def webcam_to_base64():
         with open(path, "rb") as image_file:
             base64Webcam = base64.b64encode(image_file.read()).decode("utf-8")
     else:
-        base64Webcam=''
+        base64Webcam = ''
 
 
 def record_screen(fps='30', duration='5', quality='25', h265='True'):
@@ -337,51 +385,62 @@ def record_screen(fps='30', duration='5', quality='25', h265='True'):
                 .tobytes()
         )
 
-def send_base64(data,header):
+
+def send_base64(data, header):
     max = int(len(data) / BYTES_LIMIT)
     for i in range(max + 1):
         if len(data) > BYTES_LIMIT:
-            msg = header+'@@@' + str(i) + '@@@' + str(max) + '@@@' + data[:BYTES_LIMIT]
+            msg = header + '@@@' + str(i) + '@@@' + str(max) + '@@@' + data[:BYTES_LIMIT]
         else:
-            msg = header+'@@@' + str(i) + '@@@' + str(max) + '@@@' + data
+            msg = header + '@@@' + str(i) + '@@@' + str(max) + '@@@' + data
 
         if len(list(data)) > BYTES_LIMIT:
             data = data[BYTES_LIMIT:]
         stomp = stomper.send(dest="/app/sendMessage/" + token + "/" + pcName, msg=msg)
         stomp_client.ws.send(stomp)
 
+
 def streaming():
-    global base64Screen
+    global base64Screen,its_me_who_is_sending_message
     print('STREAMING started...')
     screen_to_base64()
     while True:
         if (datetime.now() - last_streaming_start).seconds > STREAMING_TIMEOUT:
             print('STREAMING stopped...')
-            time.sleep(2)
+            its_me_who_is_sending_message = False
+            time.sleep(6)
         else:
             Thread(target=screen_to_base64).start()
-            send_base64(base64Screen,'STREAMING')
+            its_me_who_is_sending_message = True
+            send_base64(base64Screen, 'STREAMING')
 
         time.sleep(STREAMING_SPEED)
 
+
 def webcam():
-    global base64Webcam,cam
+    global base64Webcam, cam,its_me_who_is_sending_message
     print('WEBCAM started...')
-    if type(cam)==str and cam=='':
+    if type(cam) == str and cam == '':
         cam = VideoCapture(0)
     webcam_to_base64()
     while True:
         if (datetime.now() - last_webcam_start).seconds > STREAMING_TIMEOUT:
+            cam.release()
             print('WEBCAM stopped...')
-            time.sleep(2)
+            its_me_who_is_sending_message = False
+            time.sleep(5)
         else:
+            if not cam.isOpened():
+                cam.open(0)
+
+            its_me_who_is_sending_message = True
             Thread(target=webcam_to_base64).start()
-            send_base64(base64Webcam,'WEBCAM')
+            send_base64(base64Webcam, 'WEBCAM')
 
         time.sleep(WEBCAM_SPEED)
 
 
-check_client_online_thread = Thread(target=is_client_online)
+# check_client_online_thread = Thread(target=is_client_online)
 streaming_thread = Thread(target=streaming)
 webcam_thread = Thread(target=webcam)
 
@@ -389,40 +448,36 @@ webcam_thread = Thread(target=webcam)
 async def update_status():
     asyncio.create_task(work_offline())
 
-    print('avvio check_client_online_thread()...')
     start_up_commands()
-    check_client_online_thread.start()
+    # print('avvio check_client_online_thread()...')
+    # check_client_online_thread.start()
     print('avvio update_status()...')
     while True:
         if force_exit:
             return
+        StompClient.KEEP_ALIVE = True
+        if not StompClient.IS_RUNNING:
+            try:
+                Thread(target=stomp_client.create_connection).start()
+                c = 0
+                while not StompClient.IS_RUNNING:
+                    await sleep(0.5)
+                    c += 1
+                    if c > 32:
+                        raise 'timeout nella connessione del socket!'
+            except Exception as e:
+                print('errore 3 catturato! ', e)
 
         if not client_online:
-            if stomp_client.ws is not None and StompClient.IS_RUNNING:
-                stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
-                stomp_client.ws.send(stomp)
-
-                StompClient.KEEP_ALIVE = False
-                stomp_client.ws.close()
-
+            # if stomp_client.ws is not None and StompClient.IS_RUNNING:
+            #     stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+            #     stomp_client.ws.send(stomp)
+            #
+            #     StompClient.KEEP_ALIVE = False
+            #     stomp_client.ws.close()
             await sleep(CLIENT_OFFLINE)
 
         else:
-            StompClient.KEEP_ALIVE = True
-            if not StompClient.IS_RUNNING:
-                try:
-                    Thread(target=stomp_client.create_connection).start()
-                    c = 0
-                    while not StompClient.IS_RUNNING:
-                        await sleep(0.5)
-                        c += 1
-                        if c > 32:
-                            raise 'timeout nella connessione del socket!'
-
-
-                except Exception as e:
-                    print('errore 3 catturato! ', e)
-
             stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='True')
             stomp_client.ws.send(stomp)
 
@@ -803,7 +858,7 @@ def run_at(wait, command):
 
 def execute_command(command):
     #   TODO both date should be utc
-    global last_streaming_start,last_webcam_start
+    global last_streaming_start, last_webcam_start
     # print("command found! ---> " + command.command)
     if command.is_scheduled:
         secs = int((datetime.utcnow() - command.scheduleDate).total_seconds())
@@ -898,7 +953,7 @@ def execute_command(command):
         last_streaming_start = datetime(2000, 1, 1)
     elif "STREAMING_SPEED" in command.command:
         global STREAMING_SPEED
-        STREAMING_SPEED = 2 - 1.70 * 0.01 * float(command.command.split('@@@')[1])
+        STREAMING_SPEED = 2 - 1.95 * 0.01 * float(command.command.split('@@@')[1])
     elif "STREAMING_QUALITY" in command.command:
         global STREAMING_QUALITY
         STREAMING_QUALITY = 10 + 70 * 0.01 * float(command.command.split('@@@')[1])
@@ -916,10 +971,34 @@ def execute_command(command):
         last_webcam_start = datetime(2000, 1, 1)
     elif "WEBCAM_SPEED" in command.command:
         global WEBCAM_SPEED
-        WEBCAM_SPEED = 1.0 - 0.97 * 0.01 * float(command.command.split('@@@')[1])
+        WEBCAM_SPEED = 0.5 - 0.483 * 0.01 * float(command.command.split('@@@')[1])
     elif "WEBCAM_QUALITY" in command.command:
         global WEBCAM_QUALITY
         WEBCAM_QUALITY = 3 + 70 * 0.01 * float(command.command.split('@@@')[1])
+    elif "SPEECH_TO_TEXT" in command.command:
+        pyautogui.write(command.command.split('@@@')[1])
+
+    elif "LEFT_CLICK" in command.command:
+        w,h=pyautogui.size()
+        x=float(command.command.split('@@@')[1])
+        y = float(command.command.split('@@@')[2])
+
+        pyautogui.moveTo(x*w,y*h,duration=0.16)
+        pyautogui.leftClick()
+    elif "RIGHT_CLICK" in command.command:
+        w, h = pyautogui.size()
+        x = float(command.command.split('@@@')[1])
+        y = float(command.command.split('@@@')[2])
+
+        pyautogui.moveTo(x * w, y * h, duration=0.0)
+        pyautogui.rightClick()
+    elif "DOUBLE_CLICK" in command.command:
+        w,h=pyautogui.size()
+        x=float(command.command.split('@@@')[1])
+        y = float(command.command.split('@@@')[2])
+
+        pyautogui.moveTo(x*w,y*h,duration=0.1)
+        pyautogui.doubleClick()
 
 def execute_commands():
     for command in commands:
@@ -1038,7 +1117,9 @@ def initialize_and_go():
 
     StompClient.DESTINATIONS = [
         "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
-                                                                           pcName) + "/commands"
+                                                                           pcName) + "/commands",
+        "/both/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/message",
+        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/online",
     ]
 
     devices = AudioUtilities.GetSpeakers()
@@ -1084,8 +1165,50 @@ def print_battery_status():
 if __name__ == '__main__':
     initialize_and_go()
 
-    # cam = VideoCapture(0)
-    # webcam_to_base64()
+# FORMAT = pyaudio.paInt16
+# CHANNELS = 1
+# RATE = 44100
+# CHUNK = 4096
+#
+# # p=pyaudio.PyAudio()
+# # stream = p.open(format=FORMAT,
+# #                     channels=CHANNELS,
+# #                     rate=RATE,
+# #                     input=True,
+# #                     frames_per_buffer=CHUNK)
+# process2 = (
+#     ffmpeg
+#         .input('pipe:')
+#         .output('out.aac', vcodec='libfdk_aac', crf='5')
+#         .overwrite_output()
+#         .run_async(pipe_stdin=True)
+# )
+# # frames=[]
+# # for i in range(0, int(RATE/CHUNK*3)):
+# #     process2.stdin.write(
+# #         b''.join(data)
+# #     )
+# #     data=stream.read(CHUNK)
+# #     frames.append(data)
+#
+# with open('output.wav') as f:
+#     process2.stdin.write(f.
+#     )
+
+# stream.stop_stream()
+# stream.close()
+# p.terminate()
+
+
+# wf=wave.open("output.wav",'wb')
+# wf.setnchannels(CHANNELS)
+# wf.setsampwidth(p.get_sample_size(FORMAT))
+# wf.setframerate(RATE)
+# wf.writeframes(b''.join(frames))
+# wf.close()
+
+# cam = VideoCapture(0)
+# webcam_to_base64()
 
 
 # except Exception as e:
