@@ -1,3 +1,6 @@
+from __future__ import unicode_literals
+
+import ast
 import asyncio
 import base64
 import ctypes
@@ -9,6 +12,7 @@ import re
 import sched
 import threading
 import time
+import webbrowser
 from asyncio import sleep
 from ctypes import cast, POINTER
 from datetime import datetime
@@ -29,16 +33,20 @@ import stomper
 import userpaths
 import websocket
 import win32api
+import win32gui
 import win32security
 import wmi
 from GPUtil import GPUtil
 from PIL import Image
+from PIL.Image import Resampling, Palette
 from comtypes import CLSCTX_ALL
 from cv2 import VideoCapture
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 # ws_uri = "ws://localhost:5000/chat/websocket"
 from fernet import FernetCipher
+from dragonfly import Window
+import icoextract
 
 # ===========================================================================================
 # ===========================================================================================
@@ -47,7 +55,7 @@ ws_uri = "ws://mrpowermanager.herokuapp.com/chat/websocket"
 # ws_uri = "ws://localhost:5000/chat/websocket"
 
 message = ''
-its_me_who_is_sending_message=False
+its_me_who_is_sending_message = False
 
 
 class StompClient(object):
@@ -154,6 +162,10 @@ class StompClient(object):
             elif 'message' in command.keys():
                 if its_me_who_is_sending_message:
                     return
+                if 'TASK_MANAGER' in command['message']:
+                    return
+                elif 'SHARE_CLIPBOARD' in command['message']:
+                    return
                 global message
                 max = int(command['message'].split('@@@')[2])
                 index = int(command['message'].split('@@@')[1])
@@ -236,12 +248,13 @@ available_commands_response = None
 last_volume = 0
 is_locked = False
 is_locked_last = datetime(2000, month=1, day=1)
-encrypted_pass = ''
 last_client_online = datetime(2000, 1, 1)
 last_streaming_start = datetime(2000, 1, 1)
 last_webcam_start = datetime(2000, 1, 1)
 wattage_entries = []
 thread_get_commands_online = True
+open_windows = []
+last_open_windows = []
 
 c = wmi.WMI()
 t = wmi.WMI(moniker="//./root/wmi")
@@ -315,6 +328,35 @@ async def work_offline():
 #             client_online = False
 #             time.sleep(3)
 
+def get_open_windows_and_icons():
+    global open_windows, last_open_windows
+    windows = Window.get_all_windows()
+    c = 0
+    data = ''
+    open_windows = []
+    for window in windows:
+        if window.is_visible and window._get_window_text() != '':
+            try:
+                path = userpaths.get_local_appdata() + '\MrPowerManager' + '\\icon_' + str(c)
+                icoextract.IconExtractor(window.executable).export_icon(path + '.png')
+                pil_image = Image.open(path + '.png')
+
+                pil_image = pil_image.resize((96, 96), Resampling.LANCZOS)
+                pil_image = pil_image.convert("P", palette=Palette.ADAPTIVE, colors=256)
+                c += 1
+                pil_image.save(path + '.png', optimize=True)
+                open_windows.append(window)
+                data += window._get_window_text()
+                with open(path + '.png', "rb") as image_file:
+                    data += '~' + base64.b64encode(image_file.read()).decode("utf-8") + '#'
+
+            except Exception:
+                pass
+    # if last_open_windows==open_windows:
+    #     return ''
+    # last_open_windows=open_windows
+    return data
+
 
 def start_up_commands():
     if request_available_commands().status_code == 200:
@@ -350,10 +392,10 @@ def webcam_to_base64():
     result, image = cam.read()
     if result:
         path = userpaths.get_local_appdata() + '\MrPowerManager\webcam'
-        Image.fromarray(image).save(path,
-                                    "JPEG",
-                                    optimize=True,
-                                    quality=int(WEBCAM_QUALITY))
+        Image.fromarray(image).convert('L').save(path,
+                                                 "JPEG",
+                                                 optimize=True,
+                                                 quality=int(WEBCAM_QUALITY))
         with open(path, "rb") as image_file:
             base64Webcam = base64.b64encode(image_file.read()).decode("utf-8")
     else:
@@ -387,6 +429,8 @@ def record_screen(fps='30', duration='5', quality='25', h265='True'):
 
 
 def send_base64(data, header):
+    if (data == ''):
+        return
     max = int(len(data) / BYTES_LIMIT)
     for i in range(max + 1):
         if len(data) > BYTES_LIMIT:
@@ -401,7 +445,7 @@ def send_base64(data, header):
 
 
 def streaming():
-    global base64Screen,its_me_who_is_sending_message
+    global base64Screen, its_me_who_is_sending_message
     print('STREAMING started...')
     screen_to_base64()
     while True:
@@ -418,7 +462,7 @@ def streaming():
 
 
 def webcam():
-    global base64Webcam, cam,its_me_who_is_sending_message
+    global base64Webcam, cam, its_me_who_is_sending_message
     print('WEBCAM started...')
     if type(cam) == str and cam == '':
         cam = VideoCapture(0)
@@ -670,7 +714,7 @@ def check_sored_data_or_validate():
         exec(open("validate_code.py").read())
     else:
         f = open(path + '\config.dat', "r")
-        values = f.readline().split("!@@#")
+        values = f.readline().split("@@@")
         f.close()
         global token, pcName
         token = values[0]
@@ -821,10 +865,12 @@ def request_password_encrypted(name):
         'token': token,
     }
     response = dict(requests.get(url, headers=headers, params=params).json())
-    global encrypted_pass
+
     for pc in response['user']['pcList']:
         if pc['name'] == pcName:
-            encrypted_pass = pc['passwords'][name]
+            for login in pc['logins']:
+                if login['title'] == name:
+                    return login
 
 
 def request_key():
@@ -909,15 +955,38 @@ def execute_command(command):
     elif command.command == "TRACK_NEXT":
         next_trak_key()
     elif "COPY_PASSWORD" in command.command:
-        request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
+        login = request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
         fernet = FernetCipher(str.encode(command.command.split('@@@@@@@@@@@@')[2]))
-        pyperclip.copy(fernet.decrypt(encrypted_pass))
+        pyperclip.copy(fernet.decrypt(login['password']))
     elif "PASTE_PASSWORD" in command.command:
-        request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
+        login = request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
         fernet = FernetCipher(str.encode(command.command.split('@@@@@@@@@@@@')[2]))
-        pyautogui.write(fernet.decrypt(encrypted_pass))
+        url=fernet.decrypt(login['url'])
+        url='http://'+url if 'http' not in url[0:5] else url
+        pyautogui.hotkey('win','d')
+        pyautogui.sleep(0.05)
+        webbrowser.open(url,new=2,autoraise=True)
+        pyautogui.sleep(1.7)
+        keys = login['args'][1:-1].split(',')
+        for key in keys:
+            pyautogui.press(str(key).lower().strip())
+            pyautogui.sleep(0.03)
+            if (str(key).lower().strip() == 'enter'):
+                pyautogui.sleep(1)
+
+        pyautogui.write(fernet.decrypt(login['username']))
+        pyautogui.sleep(0.05)
+        pyautogui.press('tab')
+        pyautogui.write(fernet.decrypt(login['password']))
+        pyautogui.sleep(0.05)
+        pyautogui.press('enter')
+
     elif "SHARE_CLIPBOARD" in command.command:
         val = command.command.split('@@@@@@@@@@@@')[1]
+        clip=pyperclip.paste()
+        stomp = stomper.send(dest="/app/sendMessage/" + token + "/" + pcName, msg='SHARE_CLIPBOARD@@@'+clip)
+        stomp_client.ws.send(stomp)
+
         if val != 'null':
             pyperclip.copy(val)
     elif "KEYBOARD" in command.command:
@@ -979,11 +1048,11 @@ def execute_command(command):
         pyautogui.write(command.command.split('@@@')[1])
 
     elif "LEFT_CLICK" in command.command:
-        w,h=pyautogui.size()
-        x=float(command.command.split('@@@')[1])
+        w, h = pyautogui.size()
+        x = float(command.command.split('@@@')[1])
         y = float(command.command.split('@@@')[2])
 
-        pyautogui.moveTo(x*w,y*h,duration=0.16)
+        pyautogui.moveTo(x * w, y * h, duration=0.16)
         pyautogui.leftClick()
     elif "RIGHT_CLICK" in command.command:
         w, h = pyautogui.size()
@@ -993,12 +1062,25 @@ def execute_command(command):
         pyautogui.moveTo(x * w, y * h, duration=0.0)
         pyautogui.rightClick()
     elif "DOUBLE_CLICK" in command.command:
-        w,h=pyautogui.size()
-        x=float(command.command.split('@@@')[1])
+        w, h = pyautogui.size()
+        x = float(command.command.split('@@@')[1])
         y = float(command.command.split('@@@')[2])
 
-        pyautogui.moveTo(x*w,y*h,duration=0.1)
+        pyautogui.moveTo(x * w, y * h, duration=0.1)
         pyautogui.doubleClick()
+    elif "TASK_MANAGER" in command.command:
+        data = get_open_windows_and_icons()
+        send_base64(data, 'TASK_MANAGER')
+    elif "WINDOW_KILL" in command.command:
+        for window in open_windows:
+            if window._get_window_text() == command.command.split('@@@')[1]:
+                window.close()
+    elif "WINDOW_FOCUS" in command.command:
+        print("TASK_MANAGER_FOCUS")
+        for window in open_windows:
+            if window._get_window_text() == command.command.split('@@@')[1]:
+                window.set_focus()
+
 
 def execute_commands():
     for command in commands:
@@ -1164,6 +1246,8 @@ def print_battery_status():
 
 if __name__ == '__main__':
     initialize_and_go()
+
+    # win32gui.EnumWindows(winEnumHandler, None)
 
 # FORMAT = pyaudio.paInt16
 # CHANNELS = 1
