@@ -37,13 +37,15 @@ import win32gui
 import win32security
 import wmi
 from GPUtil import GPUtil
-from PIL import Image
+from PIL import Image, ImageGrab
 from PIL.Image import Resampling, Palette
 from comtypes import CLSCTX_ALL
 from cv2 import VideoCapture
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 # ws_uri = "ws://localhost:5000/chat/websocket"
+from pynput.keyboard import Controller
+
 from fernet import FernetCipher
 from dragonfly import Window
 import icoextract
@@ -55,7 +57,9 @@ ws_uri = "ws://mrpowermanager.herokuapp.com/chat/websocket"
 # ws_uri = "ws://localhost:5000/chat/websocket"
 
 message = ''
-its_me_who_is_sending_message = False
+
+
+# its_me_who_is_sending_message = False
 
 
 class StompClient(object):
@@ -121,6 +125,7 @@ class StompClient(object):
                                              on_message=self.on_msg,
                                              on_error=self.on_error,
                                              on_close=self.on_closed)
+
             self.ws.on_open = self.on_open
             Thread(target=self.sendKeepAlive).start()
 
@@ -152,50 +157,52 @@ class StompClient(object):
         """
         frame = stomper.Frame()
         unpacked_msg = stomper.Frame.unpack(frame, msg)
-        if len(unpacked_msg['body']) > 1:
-            command = dict(json.loads(unpacked_msg['body']))
-            if 'command' in command.keys():
-                command = Command(
-                    command['command'], int(command['id']), int(command['commandValue']),
-                    command['commandScheduledDate'])
-                execute_command(command)
-            elif 'message' in command.keys():
-                if its_me_who_is_sending_message:
-                    return
-                if 'TASK_MANAGER' in command['message']:
-                    return
-                elif 'SHARE_CLIPBOARD' in command['message']:
-                    return
-                global message
-                max = int(command['message'].split('@@@')[2])
-                index = int(command['message'].split('@@@')[1])
-                if (index == 0):
-                    message = ''
-                message += command['message'].split('@@@')[3]
-                if (index == max):
-                    print('gonna reproduce audio')
-                    decode_string = base64.b64decode(message)
-                    path = userpaths.get_local_appdata() + '\MrPowerManager\\rec ' + datetime.now().strftime(
-                        "%Y-%m-%d %H-%M-%S") + '.mp3'
-                    open(path, "wb").write(decode_string)
-                    if (not self.pygame_mix_started):
-                        pygame.mixer.init()
-                        self.pygame_mix_started = True
-                    # pygame.mixer.music.stop()
-                    pygame.mixer.music.load(path)
-                    pygame.mixer.music.play()
-            elif 'online' in command.keys():
-                global last_client_online, client_online
-                if str(command['online']).lower() == 'true':
-                    last_client_online = datetime.now()
-                    if not client_online:
-                        print('client è andato ONLINE!')
-                        client_online = True
-                        Thread(target=self.go_offline).start()
-                else:
-                    if client_online:
-                        print('client è andato offline!')
-                    client_online = False
+        if len(unpacked_msg['body']) <= 1:
+            return
+        socket_message = dict(json.loads(unpacked_msg['body']))
+        print(socket_message)
+        if 'command' in socket_message.keys():
+            socket_message = Command(
+                socket_message['command'], int(socket_message['id']), int(socket_message['commandValue']),
+                socket_message['commandScheduledDate'])
+            execute_command(socket_message)
+        elif 'message' in socket_message.keys():
+
+            if 'SHARE_CLIPBOARD' in socket_message['message']:
+                val = socket_message['message'].split('@@@')[1]
+                if val != 'null':
+                    pyperclip.copy(val)
+                return
+            global message
+            max = int(socket_message['message'].split('@@@')[2])
+            index = int(socket_message['message'].split('@@@')[1])
+            if (index == 0):
+                message = ''
+            message += socket_message['message'].split('@@@')[3]
+            if (index == max):
+                print('gonna reproduce audio')
+                decode_string = base64.b64decode(message)
+                path = userpaths.get_local_appdata() + '\MrPowerManager\\rec ' + datetime.now().strftime(
+                    "%Y-%m-%d %H-%M-%S") + '.mp3'
+                open(path, "wb").write(decode_string)
+                if (not self.pygame_mix_started):
+                    pygame.mixer.init()
+                    self.pygame_mix_started = True
+                # pygame.mixer.music.stop()
+                pygame.mixer.music.load(path)
+                pygame.mixer.music.play()
+        elif 'online' in socket_message.keys():
+            global last_client_online, client_online
+            if str(socket_message['online']).lower() == 'true':
+                last_client_online = datetime.now()
+                if not client_online:
+                    print('client è andato ONLINE!')
+                    client_online = True
+                    Thread(target=self.go_offline).start()
+            else:
+                if client_online:
+                    print('client è andato offline!')
+                client_online = False
 
     def on_error(self, err, b):
         """
@@ -246,8 +253,8 @@ volume = 0
 brightness = 0
 available_commands_response = None
 last_volume = 0
-is_locked = False
-is_locked_last = datetime(2000, month=1, day=1)
+# is_locked = False
+# is_locked_last = datetime(2000, month=1, day=1)
 last_client_online = datetime(2000, 1, 1)
 last_streaming_start = datetime(2000, 1, 1)
 last_webcam_start = datetime(2000, 1, 1)
@@ -258,6 +265,8 @@ last_open_windows = []
 
 c = wmi.WMI()
 t = wmi.WMI(moniker="//./root/wmi")
+
+keyboard = Controller()
 
 force_exit = False
 
@@ -271,10 +280,50 @@ stomp_client = StompClient(None)
 
 collect_wattage_in_background = True
 client_online = False
+shareClipboard = False
 
 base64Screen = ''
 base64Webcam = ''
 cam = ''
+
+
+def clipboard_listener():
+    recent_value = ""
+    while True:
+        if(not shareClipboard):
+            time.sleep(2)
+            continue
+        tmp_value = pyperclip.paste()
+
+        if recent_value not in [tmp_value]:
+            try:
+                if type(stomp_client.ws)==type(None):
+                    time.sleep(1)
+                    continue
+
+                image = ImageGrab.grabclipboard()
+                if image != None:
+                    path = userpaths.get_local_appdata() + '\MrPowerManager\screen.jpg'
+                    image.convert('RGB').save(path, "JPEG", optimize=True, quality=int(95))
+                    with open(path, "rb") as image_file:
+                        base64_image=base64.b64encode(image_file.read()).decode("utf-8")
+                        if recent_value == image:
+                            time.sleep(1)
+                            continue
+                        recent_value=image
+                        # print(len(base64_image))
+                        send_base64(base64_image,'CLIPBOARD_IMAGE')
+                else:
+                    recent_value = tmp_value
+                    print("Value changed: %s" % str(recent_value)[:100])
+
+                    stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+                                         msg='SHARE_CLIPBOARD@@@' + recent_value)
+                    stomp_client.ws.send(stomp)
+            except Exception as e:
+                print(e)
+
+        time.sleep(0.6)
 
 
 async def work_offline():
@@ -440,29 +489,29 @@ def send_base64(data, header):
 
         if len(list(data)) > BYTES_LIMIT:
             data = data[BYTES_LIMIT:]
-        stomp = stomper.send(dest="/app/sendMessage/" + token + "/" + pcName, msg=msg)
+        stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=msg)
         stomp_client.ws.send(stomp)
 
 
 def streaming():
-    global base64Screen, its_me_who_is_sending_message
+    global base64Screen
     print('STREAMING started...')
     screen_to_base64()
     while True:
         if (datetime.now() - last_streaming_start).seconds > STREAMING_TIMEOUT:
             print('STREAMING stopped...')
-            its_me_who_is_sending_message = False
+            # its_me_who_is_sending_message = False
             time.sleep(6)
         else:
             Thread(target=screen_to_base64).start()
-            its_me_who_is_sending_message = True
+            # its_me_who_is_sending_message = True
             send_base64(base64Screen, 'STREAMING')
 
         time.sleep(STREAMING_SPEED)
 
 
 def webcam():
-    global base64Webcam, cam, its_me_who_is_sending_message
+    global base64Webcam, cam
     print('WEBCAM started...')
     if type(cam) == str and cam == '':
         cam = VideoCapture(0)
@@ -471,13 +520,13 @@ def webcam():
         if (datetime.now() - last_webcam_start).seconds > STREAMING_TIMEOUT:
             cam.release()
             print('WEBCAM stopped...')
-            its_me_who_is_sending_message = False
+            # its_me_who_is_sending_message = False
             time.sleep(5)
         else:
             if not cam.isOpened():
                 cam.open(0)
 
-            its_me_who_is_sending_message = True
+            # its_me_who_is_sending_message = True
             Thread(target=webcam_to_base64).start()
             send_base64(base64Webcam, 'WEBCAM')
 
@@ -487,12 +536,14 @@ def webcam():
 # check_client_online_thread = Thread(target=is_client_online)
 streaming_thread = Thread(target=streaming)
 webcam_thread = Thread(target=webcam)
+clipboard_thread = Thread(target=clipboard_listener)
 
 
 async def update_status():
     asyncio.create_task(work_offline())
 
     start_up_commands()
+    clipboard_thread.start()
     # print('avvio check_client_online_thread()...')
     # check_client_online_thread.start()
     print('avvio update_status()...')
@@ -559,7 +610,7 @@ async def update_status():
             #     'isLocked': is_locked,
             # }
             msg = [wifi, True, battery_plugged, wifi, volume == 0, False,
-                   False, False, is_locked, volume, brightness, battery_perc
+                   False, False, shareClipboard, volume, brightness, battery_perc
                 , battery_left, cpu_usage, ram_usage, 50, disk_usage
                 , gpu_usage, gpu_temp, battery_charge_rate, battery_discharge_rate]
             stomp = stomper.send(dest="/app/updatePcStatus/" + token + "/" + pcName,
@@ -641,9 +692,9 @@ def get_pc_data():
     global brightness
     brightness = screen_brightness_control.get_brightness()[0]
 
-    global is_locked
-    if (datetime.utcnow() - is_locked_last).total_seconds() > 12:
-        is_locked = is_system_locked()
+    # global is_locked
+    # if (datetime.utcnow() - is_locked_last).total_seconds() > 12:
+    #     is_locked = is_system_locked()
 
 
 def set_volume(value):
@@ -921,10 +972,14 @@ def execute_command(command):
         set_volume(int(command.value))
     elif command.command == "BRIGHTNESS_VALUE":
         set_brightness(int(command.value))
-    elif command.command == "BRIGHTNESS_DOWN":
-        set_brightness(max(0, get_brightness()[0] - 10))
-    elif command.command == "BRIGHTNESS_UP":
-        set_brightness(min(100, get_brightness()[0] + 10))
+    elif command.command.split('@@@')[0] == "BRIGHTNESS_DOWN":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            set_brightness(max(0, get_brightness()[0] - 10))
+            pyautogui.sleep(0.05)
+    elif command.command.split('@@@')[0] == "BRIGHTNESS_UP":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            set_brightness(min(100, get_brightness()[0] + 10))
+            pyautogui.sleep(0.05)
     elif command.command == "SLEEP":
         suspend()
     elif command.command == "HIBERNATE":
@@ -932,9 +987,9 @@ def execute_command(command):
     elif command.command == "SHUTDOWN":
         shutdown()
     elif command.command == "LOCK":
-        global is_locked, is_locked_last
-        is_locked = True
-        is_locked_last = datetime.utcnow()
+        # global is_locked, is_locked_last
+        # is_locked = True
+        # is_locked_last = datetime.utcnow()
         ctypes.windll.user32.LockWorkStation()
     elif command.command == "UNLOCK":
         unlock_pc()
@@ -944,16 +999,24 @@ def execute_command(command):
         set_wifi(False)
     elif command.command == "NO_SOUND":
         mute_key()
-    elif command.command == "SOUND_DOWN":
-        volume_down_key()
-    elif command.command == "SOUND_UP":
-        volume_up_key()
+    elif command.command.split('@@@')[0] == "SOUND_DOWN":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            volume_down_key()
+            pyautogui.sleep(0.04)
+    elif command.command.split('@@@')[0] == "SOUND_UP":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            volume_up_key()
+            pyautogui.sleep(0.04)
     elif command.command == "PLAY_PAUSE":
         play_pause_key()
-    elif command.command == "TRACK_PREVIOUS":
-        prev_trak_key()
-    elif command.command == "TRACK_NEXT":
-        next_trak_key()
+    elif command.command.split('@@@')[0] == "TRACK_PREVIOUS":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            prev_trak_key()
+            pyautogui.sleep(0.04)
+    elif command.command.split('@@@')[0] == "TRACK_NEXT":
+        for i in range(0,int(command.command.split('@@@')[1])):
+            next_trak_key()
+            pyautogui.sleep(0.04)
     elif "COPY_PASSWORD" in command.command:
         login = request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
         fernet = FernetCipher(str.encode(command.command.split('@@@@@@@@@@@@')[2]))
@@ -961,34 +1024,40 @@ def execute_command(command):
     elif "PASTE_PASSWORD" in command.command:
         login = request_password_encrypted(command.command.split('@@@@@@@@@@@@')[1])
         fernet = FernetCipher(str.encode(command.command.split('@@@@@@@@@@@@')[2]))
-        url=fernet.decrypt(login['url'])
-        url='http://'+url if 'http' not in url[0:5] else url
-        pyautogui.hotkey('win','d')
+        url = fernet.decrypt(login['url'])
+        url = 'http://' + url if 'http' not in url[0:5] else url
+        if (fernet.decrypt(login['username']) == ' '):
+            webbrowser.open(url, new=2, autoraise=True)
+            return
+
+        pyautogui.hotkey('win', 'd')
         pyautogui.sleep(0.05)
-        webbrowser.open(url,new=2,autoraise=True)
-        pyautogui.sleep(1.7)
+        webbrowser.open(url, new=2, autoraise=True)
+        pyautogui.sleep(3)
         keys = login['args'][1:-1].split(',')
         for key in keys:
             pyautogui.press(str(key).lower().strip())
             pyautogui.sleep(0.03)
             if (str(key).lower().strip() == 'enter'):
-                pyautogui.sleep(1)
+                pyautogui.sleep(2)
 
-        pyautogui.write(fernet.decrypt(login['username']))
+        keyboard.type(fernet.decrypt(login['username']))
         pyautogui.sleep(0.05)
         pyautogui.press('tab')
-        pyautogui.write(fernet.decrypt(login['password']))
+        keyboard.type(fernet.decrypt(login['password']))
         pyautogui.sleep(0.05)
         pyautogui.press('enter')
 
     elif "SHARE_CLIPBOARD" in command.command:
-        val = command.command.split('@@@@@@@@@@@@')[1]
-        clip=pyperclip.paste()
-        stomp = stomper.send(dest="/app/sendMessage/" + token + "/" + pcName, msg='SHARE_CLIPBOARD@@@'+clip)
-        stomp_client.ws.send(stomp)
+        global shareClipboard
+        shareClipboard = str(command.command.split('@@@')[1]).lower() == 'true'
 
-        if val != 'null':
-            pyperclip.copy(val)
+    elif "SEND_CLIPBOARD" in command.command:
+        val=command.command.split('@@@')[1]
+        if len(val)<=1:
+            return
+        pyperclip.copy(val)
+
     elif "KEYBOARD" in command.command:
         to_hold = list(filter(None, command.command.split('@@@')[1].split(':')))
         print('to_hold=' + str(to_hold))
@@ -1045,7 +1114,7 @@ def execute_command(command):
         global WEBCAM_QUALITY
         WEBCAM_QUALITY = 3 + 70 * 0.01 * float(command.command.split('@@@')[1])
     elif "SPEECH_TO_TEXT" in command.command:
-        pyautogui.write(command.command.split('@@@')[1])
+        keyboard.type(command.command.split('@@@')[1])
 
     elif "LEFT_CLICK" in command.command:
         w, h = pyautogui.size()
@@ -1200,8 +1269,11 @@ def initialize_and_go():
     StompClient.DESTINATIONS = [
         "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
                                                                            pcName) + "/commands",
-        "/both/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/message",
+
         "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/online",
+
+        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
+                                                                           pcName) + "/message",
     ]
 
     devices = AudioUtilities.GetSpeakers()
