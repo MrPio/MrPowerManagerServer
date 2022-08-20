@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import sched
+import sys
 import threading
 import time
 import webbrowser
@@ -18,7 +19,10 @@ from ctypes import cast, POINTER
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
+from tkinter.messagebox import showinfo
+from tkinter.ttk import Progressbar, Style
 
+import PIL.Image
 import cv2
 import ffmpeg
 import numpy as np
@@ -27,6 +31,7 @@ import psutil
 import pyautogui
 import pygame
 import pyperclip
+import pystray
 import requests
 import screen_brightness_control
 import stomper
@@ -45,10 +50,14 @@ from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 # ws_uri = "ws://localhost:5000/chat/websocket"
 from pynput.keyboard import Controller
+import tkdnd
 
 from fernet import FernetCipher
 from dragonfly import Window
 import icoextract
+import tkinter as tk
+import tkinter.font as font
+from tkinter import filedialog, X
 
 # ===========================================================================================
 # ===========================================================================================
@@ -231,7 +240,7 @@ WEBCAM_SPEED = 0.1
 STREAMING_QUALITY = 15
 WEBCAM_QUALITY = 30
 STREAMING_TIMEOUT = 12
-BYTES_LIMIT = 14000
+BYTES_LIMIT = 15000
 REQUEST_AVAILABLE_COMMANDS = 2
 web = "https://mrpowermanager.herokuapp.com"
 
@@ -290,14 +299,14 @@ cam = ''
 def clipboard_listener():
     recent_value = ""
     while True:
-        if(not shareClipboard):
+        if (not shareClipboard):
             time.sleep(2)
             continue
         tmp_value = pyperclip.paste()
 
         if recent_value not in [tmp_value]:
             try:
-                if type(stomp_client.ws)==type(None):
+                if type(stomp_client.ws) == type(None):
                     time.sleep(1)
                     continue
 
@@ -306,22 +315,23 @@ def clipboard_listener():
                     path = userpaths.get_local_appdata() + '\MrPowerManager\screen.jpg'
                     image.convert('RGB').save(path, "JPEG", optimize=True, quality=int(95))
                     with open(path, "rb") as image_file:
-                        base64_image=base64.b64encode(image_file.read()).decode("utf-8")
+                        base64_image = base64.b64encode(image_file.read()).decode("utf-8")
                         if recent_value == image:
                             time.sleep(1)
                             continue
-                        recent_value=image
-                        # print(len(base64_image))
-                        send_base64(base64_image,'CLIPBOARD_IMAGE')
+                        recent_value = image
+                        print(len(base64_image))
+                        send_base64(base64_image, 'CLIPBOARD_IMAGE')
                 else:
                     recent_value = tmp_value
                     print("Value changed: %s" % str(recent_value)[:100])
 
-                    stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
-                                         msg='SHARE_CLIPBOARD@@@' + recent_value)
-                    stomp_client.ws.send(stomp)
+                    send_base64(recent_value,'SHARE_CLIPBOARD')
+                    # stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+                    #                      msg='SHARE_CLIPBOARD@@@' + recent_value)
+                    # stomp_client.ws.send(stomp)
             except Exception as e:
-                print(e)
+                print('err--->'+str(e))
 
         time.sleep(0.6)
 
@@ -476,21 +486,38 @@ def record_screen(fps='30', duration='5', quality='25', h265='True'):
                 .tobytes()
         )
 
-
-def send_base64(data, header):
+max=0
+send_start=time.time_ns()
+def send_base64(data, header,make_progress=False,wait=0.001):
+    global force_block,max,send_start
     if (data == ''):
         return
+    print(len(data))
     max = int(len(data) / BYTES_LIMIT)
+    stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+                         msg='START_OF_MESSAGE@@@'+header+'@@@'+str(max+1))
+    stomp_client.ws.send(stomp)
+    send_start = time.time_ns()
     for i in range(max + 1):
-        if len(data) > BYTES_LIMIT:
-            msg = header + '@@@' + str(i) + '@@@' + str(max) + '@@@' + data[:BYTES_LIMIT]
-        else:
-            msg = header + '@@@' + str(i) + '@@@' + str(max) + '@@@' + data
+        if force_block:
+            force_block=False
+            return
+        if(make_progress):
+            progress(round(i * 100 / max, 1))
+        if i<max:
+            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=data[i*BYTES_LIMIT:(i+1)*BYTES_LIMIT])
+        elif i==max:
+            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=data[max*BYTES_LIMIT:])
 
-        if len(list(data)) > BYTES_LIMIT:
-            data = data[BYTES_LIMIT:]
-        stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=msg)
+        # if len(list(data)) > BYTES_LIMIT:
+        #     data = data[BYTES_LIMIT:]
+        # stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=msg)
         stomp_client.ws.send(stomp)
+        time.sleep(wait)
+
+    # stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+    #                      msg='END_OF_MESSAGE')
+    # stomp_client.ws.send(stomp)
 
 
 def streaming():
@@ -553,7 +580,9 @@ async def update_status():
         StompClient.KEEP_ALIVE = True
         if not StompClient.IS_RUNNING:
             try:
-                Thread(target=stomp_client.create_connection).start()
+                t= Thread(target=stomp_client.create_connection)
+                t.setDaemon(True)
+                t.start()
                 c = 0
                 while not StompClient.IS_RUNNING:
                     await sleep(0.5)
@@ -973,11 +1002,11 @@ def execute_command(command):
     elif command.command == "BRIGHTNESS_VALUE":
         set_brightness(int(command.value))
     elif command.command.split('@@@')[0] == "BRIGHTNESS_DOWN":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             set_brightness(max(0, get_brightness()[0] - 10))
             pyautogui.sleep(0.05)
     elif command.command.split('@@@')[0] == "BRIGHTNESS_UP":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             set_brightness(min(100, get_brightness()[0] + 10))
             pyautogui.sleep(0.05)
     elif command.command == "SLEEP":
@@ -1000,21 +1029,21 @@ def execute_command(command):
     elif command.command == "NO_SOUND":
         mute_key()
     elif command.command.split('@@@')[0] == "SOUND_DOWN":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             volume_down_key()
             pyautogui.sleep(0.04)
     elif command.command.split('@@@')[0] == "SOUND_UP":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             volume_up_key()
             pyautogui.sleep(0.04)
     elif command.command == "PLAY_PAUSE":
         play_pause_key()
     elif command.command.split('@@@')[0] == "TRACK_PREVIOUS":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             prev_trak_key()
             pyautogui.sleep(0.04)
     elif command.command.split('@@@')[0] == "TRACK_NEXT":
-        for i in range(0,int(command.command.split('@@@')[1])):
+        for i in range(0, int(command.command.split('@@@')[1])):
             next_trak_key()
             pyautogui.sleep(0.04)
     elif "COPY_PASSWORD" in command.command:
@@ -1053,8 +1082,8 @@ def execute_command(command):
         shareClipboard = str(command.command.split('@@@')[1]).lower() == 'true'
 
     elif "SEND_CLIPBOARD" in command.command:
-        val=command.command.split('@@@')[1]
-        if len(val)<=1:
+        val = command.command.split('@@@')[1]
+        if len(val) <= 1:
             return
         pyperclip.copy(val)
 
@@ -1091,7 +1120,7 @@ def execute_command(command):
         last_streaming_start = datetime(2000, 1, 1)
     elif "STREAMING_SPEED" in command.command:
         global STREAMING_SPEED
-        STREAMING_SPEED = 2 - 1.95 * 0.01 * float(command.command.split('@@@')[1])
+        STREAMING_SPEED = 2 - 1.975 * 0.01 * float(command.command.split('@@@')[1])
     elif "STREAMING_QUALITY" in command.command:
         global STREAMING_QUALITY
         STREAMING_QUALITY = 10 + 70 * 0.01 * float(command.command.split('@@@')[1])
@@ -1109,7 +1138,7 @@ def execute_command(command):
         last_webcam_start = datetime(2000, 1, 1)
     elif "WEBCAM_SPEED" in command.command:
         global WEBCAM_SPEED
-        WEBCAM_SPEED = 0.5 - 0.483 * 0.01 * float(command.command.split('@@@')[1])
+        WEBCAM_SPEED = 0.5 - 0.480 * 0.01 * float(command.command.split('@@@')[1])
     elif "WEBCAM_QUALITY" in command.command:
         global WEBCAM_QUALITY
         WEBCAM_QUALITY = 3 + 70 * 0.01 * float(command.command.split('@@@')[1])
@@ -1316,7 +1345,205 @@ def print_battery_status():
         print('Critical:          ' + str(b.Critical))
 
 
+file_to_send_path = ''
+
+var = ''
+var_button = 'SendFile'
+pb = ''
+value_label = ''
+force_block = False
+
+
+def update_progress_label():
+    v=0
+    if(len(file_to_send_path)>1 and (time.time_ns()-send_start)>100000000):
+        size=os.path.getsize(filename=file_to_send_path)/1024
+        current=size*pb['value']/100
+        time_s=(time.time_ns()-send_start)/1000000000.0
+        v=current/time_s
+    return f"{pb['value']}% {round(v,0)} kB/s" if pb['value'] > 0 else ""
+
+
+def progress(val):
+    if pb['value'] < 100:
+        pb['value'] = val
+        value_label['text'] = update_progress_label()
+    # else:
+    #     showinfo(message='The progress completed!')
+    #     pb['value'] = 0
+
+
+def on_exit(icon, item):
+    if str(item) == 'Exit':
+        global force_exit
+        force_exit = True
+        # sys.exit(1)
+        os._exit(1)
+    elif str(item) == 'Send file to phone [file selector]':
+        # root = tk.Tk()
+        # root.withdraw()
+
+        file_path = filedialog.askopenfilename()
+        if file_path == '':
+            return
+
+        # limit 500MB
+        if os.path.getsize(filename=file_path) > 512000000:
+            return
+
+        with open(file_path, "rb") as file:
+            base64_file = base64.b64encode(file.read()).decode("utf-8")
+            send_base64(base64_file, 'FILE_FROM_SERVER:' + file_path.split('/')[-1],wait=0.015)
+    elif str(item) == 'Send file to phone [drag&drop]':
+
+        def drop(event):
+            global file_to_send_path, var
+            # print(event.data)
+            # files = str(event.data)[0:-1].split('} ')
+
+            final_files=[]
+            final_file=''
+
+            in_bracket=False
+            for letter in event.data:
+                if(letter!='{'):
+                    if letter == '}':
+                        in_bracket = False
+                        final_files.append(final_file)
+                        final_file=''
+                    else:
+                        if letter==' ' and not in_bracket:
+                            if len(final_file)>1:
+                                final_files.append(final_file)
+                            final_file=''
+                        else:
+                            final_file+=letter
+                else:
+                    in_bracket=True
+            if len(final_file)>1:
+                final_files.append(final_file)
+
+            # print(str(final_files))
+
+            #file_to_send_path = str(files[-1])[1:]
+            # formatted=''
+            # for file in files:
+            # formatted = str(files[-1])[1:].split('/')[-1]
+            file_to_send_path = final_files[-1]
+            formatted=final_files[-1].split('/')[-1]
+            var.set(formatted)
+
+        def send():
+            global file_to_send_path,var_button,force_block
+            if file_to_send_path != '':
+                if pb['value'] > 0.01:
+                    if pb['value']!=100:
+                        force_block = True
+                    value_label['text']=''
+                    var_button.set('SendFile')
+                    pb['value'] = 0
+                    return
+                var_button.set('Stop')
+                # limit 500MB
+                if os.path.getsize(filename=file_to_send_path) > 512000000:
+                    return
+                force_block = False
+                with open(file_to_send_path, "rb") as file:
+                    base64_file = base64.b64encode(file.read()).decode("utf-8")
+
+                    # string = '1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111'
+                    # msg = ''
+                    # for i in range(240000):
+                    #     msg += string
+
+                    Thread(target=send_base64,
+                           args=[base64_file, 'FILE_FROM_SERVER:' +
+                                 file_to_send_path.split('/')[-1],True,0.015]).start()
+
+        ws = tkdnd.Tk()
+        ws.title('Drag&Drop file')
+        ws.geometry('500x360')
+        ws.config(bg='#fcba03')
+
+        global var,var_button
+        var = tk.StringVar()
+        var_button=tk.StringVar(value='SendFile')
+        tk.Label(ws, text='Path of the Folder', bg='#fcba03', font=font.Font(family='Helvetica'), ).pack(anchor=tk.NW,
+                                                                                                         padx=10)
+        e_box = tk.Entry(ws, textvar=var, width=80, font=font.Font(family='Helvetica', size=15))
+        e_box.pack(fill=X, padx=10)
+        e_box.drop_target_register(tkdnd.DND_FILES)
+        e_box.dnd_bind('<<Drop>>', drop)
+
+        lframe = tk.LabelFrame(ws, text='Instructions', bg='#fcba03', font=font.Font(family='Helvetica'))
+        label = tk.Label(
+            lframe,
+            bg='#fcba03',
+            font=font.Font(family='Helvetica', size=13),
+            text='Drag and drop here \nthe files of your choice.'
+
+        )
+        label.drop_target_register(tkdnd.DND_FILES)
+        label.dnd_bind('<<Drop>>', drop)
+        label.pack(fill=tk.BOTH, expand=True)
+        lframe.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # progressbar
+        s = Style()
+        s.theme_use('clam')
+        s.configure("my.Horizontal.TProgressbar", background='#fcba03')
+
+        global pb
+        pb = Progressbar(
+            ws,
+            orient='horizontal',
+            mode='determinate',
+            length=370,
+            value=0,
+            style="my.Horizontal.TProgressbar",
+        )
+        # place the progressbar
+        pb.pack(padx=10, pady=20)
+
+        # label
+        global value_label
+        value_label = tk.Label(
+            ws,
+            text=update_progress_label(),
+            font=font.Font(family='Helvetica', size=14),
+            bg='#fcba03'
+        )
+        value_label.pack()
+
+        button = tk.Button(ws, textvariable=var_button, bg='#0176AB', activebackground='#fcba03',
+                           fg='#ffffff', font=font.Font(family='Helvetica', size=15), command=send)
+
+        button.pack(pady=10)
+
+        ws.mainloop()
+
+
+def start_tray():
+    pystray.Icon(
+        'MrPowerManagerServer',
+        PIL.Image.open('icon.ico'),
+        menu=pystray.Menu(
+            pystray.MenuItem(
+                'Send file to phone [file selector]', on_exit
+            ),
+            pystray.MenuItem(
+                'Send file to phone [drag&drop]', on_exit
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                'Exit', on_exit
+            ),
+        )
+    ).run()
+
+
 if __name__ == '__main__':
+    Thread(target=start_tray).start()
     initialize_and_go()
 
     # win32gui.EnumWindows(winEnumHandler, None)
