@@ -1,6 +1,5 @@
 from __future__ import unicode_literals
 
-import ast
 import asyncio
 import base64
 import ctypes
@@ -10,21 +9,22 @@ import os
 import queue
 import re
 import sched
-import sys
-import threading
 import time
+import tkinter as tk
+import tkinter.font as font
 import webbrowser
 from asyncio import sleep
 from ctypes import cast, POINTER
 from datetime import datetime
 from pathlib import Path
 from threading import Thread
-from tkinter.messagebox import showinfo
+from tkinter import filedialog, X
 from tkinter.ttk import Progressbar, Style
 
 import PIL.Image
 import cv2
 import ffmpeg
+import icoextract
 import numpy as np
 import polling2
 import psutil
@@ -35,10 +35,10 @@ import pystray
 import requests
 import screen_brightness_control
 import stomper
+import tkdnd
 import userpaths
 import websocket
 import win32api
-import win32gui
 import win32security
 import wmi
 from GPUtil import GPUtil
@@ -46,18 +46,12 @@ from PIL import Image, ImageGrab
 from PIL.Image import Resampling, Palette
 from comtypes import CLSCTX_ALL
 from cv2 import VideoCapture
+from dragonfly import Window
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-
 # ws_uri = "ws://localhost:5000/chat/websocket"
 from pynput.keyboard import Controller
-import tkdnd
 
 from fernet import FernetCipher
-from dragonfly import Window
-import icoextract
-import tkinter as tk
-import tkinter.font as font
-from tkinter import filedialog, X
 
 # ===========================================================================================
 # ===========================================================================================
@@ -100,6 +94,7 @@ class StompClient(object):
 
     @staticmethod
     def on_open(ws):
+        global log
         """
         Handler when a websocket connection is opened.
         Args:
@@ -112,17 +107,23 @@ class StompClient(object):
         for destination in StompClient.DESTINATIONS:
             sub = stomper.subscribe(destination, "uniqueId", ack="auto")
             ws.send(sub)
-        print("The websocket connection is open.")
+        add_log( "The websocket connection is open.")
         StompClient.IS_RUNNING = True
 
     def sendKeepAlive(self):
+        global log
+        pyautogui.sleep(3)
         while True:
-            pyautogui.sleep(48)
             if not StompClient.KEEP_ALIVE:
-                print("Keep alive pooling deactivated!")
+                add_log( "Keep alive pooling deactivated!")
                 return
-            print("sending keepAlive packet...")
-            self.ws.send(stomper.send("/app/keepAlive", "keepAlive"))
+            add_log( "sending keepAlive packet...")
+            try:
+                self.ws.send(stomper.send("/app/keepAlive", "keepAlive"))
+                pyautogui.sleep(30)
+            except Exception as e:
+                add_log( "COULD NOT SEND KEEP ALIVE! another try in 2 secs...")
+                pyautogui.sleep(2)
 
     def create_connection(self):
         """
@@ -134,9 +135,9 @@ class StompClient(object):
                                              on_message=self.on_msg,
                                              on_error=self.on_error,
                                              on_close=self.on_closed)
+            Thread(target=self.sendKeepAlive).start()
 
             self.ws.on_open = self.on_open
-            Thread(target=self.sendKeepAlive).start()
 
         # Run until interruption to client or server terminates connection.
         self.ws.run_forever()
@@ -150,15 +151,20 @@ class StompClient(object):
         self.NOTIFICATIONS.put(msg)
 
     def go_offline(self):
+        global log
+
         global client_online
         while (datetime.now() - last_client_online).seconds < 20:
             if not client_online:
                 return
             time.sleep(3)
-        print('il cliente non si è fatto più sentire... concludo che è andato offline!')
+        log += ('\n' + datetime.now().strftime(
+            "%H-%M-%S") + ' -> ' + 'il cliente non si è fatto più sentire... concludo che è andato offline!')
         client_online = False
 
     def on_msg(self, c, msg):
+        global log
+
         """
         Handler for receiving a message.
         Args:
@@ -169,7 +175,7 @@ class StompClient(object):
         if len(unpacked_msg['body']) <= 1:
             return
         socket_message = dict(json.loads(unpacked_msg['body']))
-        print(socket_message)
+        add_log( str(socket_message))
         if 'command' in socket_message.keys():
             socket_message = Command(
                 socket_message['command'], int(socket_message['id']), int(socket_message['commandValue']),
@@ -189,7 +195,7 @@ class StompClient(object):
                 message = ''
             message += socket_message['message'].split('@@@')[3]
             if (index == max):
-                print('gonna reproduce audio')
+                add_log( 'gonna reproduce audio')
                 decode_string = base64.b64decode(message)
                 path = userpaths.get_local_appdata() + '\MrPowerManager\\rec ' + datetime.now().strftime(
                     "%Y-%m-%d %H-%M-%S") + '.mp3'
@@ -205,12 +211,12 @@ class StompClient(object):
             if str(socket_message['online']).lower() == 'true':
                 last_client_online = datetime.now()
                 if not client_online:
-                    print('client è andato ONLINE!')
+                    add_log( 'client è andato ONLINE!')
                     client_online = True
                     Thread(target=self.go_offline).start()
             else:
                 if client_online:
-                    print('client è andato offline!')
+                    add_log( 'client è andato offline!')
                 client_online = False
 
     def on_error(self, err, b):
@@ -219,18 +225,29 @@ class StompClient(object):
         Args:
           err(str): Error received.
         """
-        print("The Error is:- " + str(b))
+        global log
+        add_log( "The Error is:- " + str(b))
+        log += ('\n' + datetime.now().strftime("%H-%M-%S") + 'provo a risolvere riavviando create_connection()')
+        self.ws.close()
+        self.create_connection()
 
     def on_closed(self, a, b, c):
+        global log
+
         """
         Handler when a websocket is closed, ends the client thread.
         """
         StompClient.IS_RUNNING = False
-        print("The websocket connection is closed.")
+        add_log( "The websocket connection is closed.")
+        # log+=('\n'+datetime.now().strftime("%H-%M-%S")+'provo a risolvere riavviando create_connection()')
+        # self.create_connection()
 
 
 # ===========================================================================================
 # ===========================================================================================
+def add_log(str):
+    global log
+    log += ('\n ' + datetime.now().strftime("%H-%M-%S") + ' -> ' +str)
 
 
 UPDATE_STATUS = 1
@@ -271,6 +288,7 @@ wattage_entries = []
 thread_get_commands_online = True
 open_windows = []
 last_open_windows = []
+log = ''
 
 c = wmi.WMI()
 t = wmi.WMI(moniker="//./root/wmi")
@@ -298,8 +316,9 @@ cam = ''
 
 def clipboard_listener():
     recent_value = ""
+    global log
     while True:
-        if (not shareClipboard):
+        if not shareClipboard:
             time.sleep(2)
             continue
         tmp_value = pyperclip.paste()
@@ -320,24 +339,26 @@ def clipboard_listener():
                             time.sleep(1)
                             continue
                         recent_value = image
-                        print(len(base64_image))
                         send_base64(base64_image, 'CLIPBOARD_IMAGE')
                 else:
                     recent_value = tmp_value
-                    print("Value changed: %s" % str(recent_value)[:100])
 
-                    send_base64(recent_value,'SHARE_CLIPBOARD')
+                    add_log( "Value changed: %s" % str(
+                        recent_value)[:100])
+
+                    send_base64(recent_value, 'SHARE_CLIPBOARD')
                     # stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
                     #                      msg='SHARE_CLIPBOARD@@@' + recent_value)
                     # stomp_client.ws.send(stomp)
             except Exception as e:
-                print('err--->'+str(e))
+                add_log( 'err--->' + str(e))
 
-        time.sleep(0.6)
+        time.sleep(0.5)
 
 
 async def work_offline():
-    print('work_offline() start')
+    global log
+    add_log( 'work_offline() start')
     global wattage_entries
     while True:
 
@@ -356,10 +377,10 @@ async def work_offline():
             "batteryDischargeRate": battery_discharge_rate
         }
         wattage_entries.append(entry)
-        print('wattage_entries--->', len(wattage_entries))
+        add_log( 'wattage_entries--->' + str(len(wattage_entries)))
 
         if len(wattage_entries) > 1:
-            print('upload_wattage_entries')
+            add_log( 'upload_wattage_entries')
             Thread(target=upload_wattage_entries).start()
 
         await asyncio.sleep(240)
@@ -377,18 +398,18 @@ async def work_offline():
 #         # TODO if list_files("/database/clients").__contains__(token + ".user"):
 #         if True:
 #             if not client_online:
-#                 print('client è andato ONLINE!')
+#                 log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+'client è andato ONLINE!')
 #             client_online = True
 #             last_client_online = datetime.now()
 #             time.sleep(12)
 #         else:
 #             if client_online:
-#                 print('client è andato offline!')
+#                 log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+'client è andato offline!')
 #             client_online = False
 #             time.sleep(3)
 
 def get_open_windows_and_icons():
-    global open_windows, last_open_windows
+    global open_windows, last_open_windows, log
     windows = Window.get_all_windows()
     c = 0
     data = ''
@@ -418,11 +439,12 @@ def get_open_windows_and_icons():
 
 
 def start_up_commands():
+    global log
     if request_available_commands().status_code == 200:
-        print("found commands!")
+        add_log( "found commands!")
         response_dict = dict(available_commands_response.json())
         if 'pc not found' in response_dict['result']:
-            print("pc does not exit")
+            add_log( "pc does not exit")
             path = userpaths.get_local_appdata() + '\MrPowerManager'
             os.remove(path + '\config.dat')
             global force_exit
@@ -436,6 +458,8 @@ def start_up_commands():
 
 
 def screen_to_base64():
+    global log
+
     global base64Screen
     path = userpaths.get_local_appdata() + '\MrPowerManager\screen'
     pyautogui.screenshot().save(path,
@@ -447,6 +471,8 @@ def screen_to_base64():
 
 
 def webcam_to_base64():
+    global log
+
     global base64Webcam
     result, image = cam.read()
     if result:
@@ -462,6 +488,8 @@ def webcam_to_base64():
 
 
 def record_screen(fps='30', duration='5', quality='25', h265='True'):
+    global log
+
     codec = 'libx265' if h265.__str__().lower() == 'true' else 'libx264'
     path = userpaths.get_desktop() + '\\' + datetime.now().strftime("%Y-%m-%d %H-%M-%S") + '.mkv'
     process2 = (
@@ -486,28 +514,35 @@ def record_screen(fps='30', duration='5', quality='25', h265='True'):
                 .tobytes()
         )
 
-max=0
-send_start=time.time_ns()
-def send_base64(data, header,make_progress=False,wait=0.001):
-    global force_block,max,send_start
+
+maxStomps = 0
+send_start = time.time_ns()
+
+
+def send_base64(data, header, make_progress=False, wait=0.001):
+    global log
+
+    global force_block, maxStomps, send_start
     if (data == ''):
         return
-    print(len(data))
-    max = int(len(data) / BYTES_LIMIT)
+    add_log( str(len(data)))
+    maxStomps = int(len(data) / BYTES_LIMIT)
     stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
-                         msg='START_OF_MESSAGE@@@'+header+'@@@'+str(max+1))
+                         msg='START_OF_MESSAGE@@@' + header + '@@@' + str(maxStomps + 1))
     stomp_client.ws.send(stomp)
     send_start = time.time_ns()
-    for i in range(max + 1):
+    for i in range(maxStomps + 1):
         if force_block:
-            force_block=False
+            force_block = False
             return
-        if(make_progress):
-            progress(round(i * 100 / max, 1))
-        if i<max:
-            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=data[i*BYTES_LIMIT:(i+1)*BYTES_LIMIT])
-        elif i==max:
-            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName, msg=data[max*BYTES_LIMIT:])
+        if (make_progress):
+            progress(round(i * 100 / maxStomps, 1))
+        if i < maxStomps:
+            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+                                 msg=data[i * BYTES_LIMIT:(i + 1) * BYTES_LIMIT])
+        elif i == maxStomps:
+            stomp = stomper.send(dest="/app/sendMessage/to/client/" + token + "/" + pcName,
+                                 msg=data[maxStomps * BYTES_LIMIT:])
 
         # if len(list(data)) > BYTES_LIMIT:
         #     data = data[BYTES_LIMIT:]
@@ -521,12 +556,14 @@ def send_base64(data, header,make_progress=False,wait=0.001):
 
 
 def streaming():
+    global log
+
     global base64Screen
-    print('STREAMING started...')
+    add_log( 'STREAMING started...')
     screen_to_base64()
     while True:
         if (datetime.now() - last_streaming_start).seconds > STREAMING_TIMEOUT:
-            print('STREAMING stopped...')
+            add_log( 'STREAMING stopped...')
             # its_me_who_is_sending_message = False
             time.sleep(6)
         else:
@@ -538,15 +575,17 @@ def streaming():
 
 
 def webcam():
+    global log
+
     global base64Webcam, cam
-    print('WEBCAM started...')
+    add_log( 'WEBCAM started...')
     if type(cam) == str and cam == '':
         cam = VideoCapture(0)
     webcam_to_base64()
     while True:
         if (datetime.now() - last_webcam_start).seconds > STREAMING_TIMEOUT:
             cam.release()
-            print('WEBCAM stopped...')
+            add_log( 'WEBCAM stopped...')
             # its_me_who_is_sending_message = False
             time.sleep(5)
         else:
@@ -555,7 +594,7 @@ def webcam():
 
             # its_me_who_is_sending_message = True
             Thread(target=webcam_to_base64).start()
-            send_base64(base64Webcam, 'WEBCAM')
+            send_base64(base64Webcam, 'WEBCAM', False, 0.001)
 
         time.sleep(WEBCAM_SPEED)
 
@@ -566,22 +605,33 @@ webcam_thread = Thread(target=webcam)
 clipboard_thread = Thread(target=clipboard_listener)
 
 
+# Here is the heart of the script
 async def update_status():
+    global log
+
+    add_log( 'avvio update_status()...')
     asyncio.create_task(work_offline())
+    add_log( 'work_offline thread started')
 
     start_up_commands()
+    add_log( 'start_up_commands done')
+    # time.sleep(16)
+
     clipboard_thread.start()
-    # print('avvio check_client_online_thread()...')
+    add_log( 'clipboard_thread thread started')
+
+    # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+'avvio check_client_online_thread()...')
     # check_client_online_thread.start()
-    print('avvio update_status()...')
     while True:
         if force_exit:
             return
         StompClient.KEEP_ALIVE = True
+
         if not StompClient.IS_RUNNING:
+            add_log( 'Stomp client offline! Gonna start it...')
             try:
-                t= Thread(target=stomp_client.create_connection)
-                t.setDaemon(True)
+                t = Thread(target=stomp_client.create_connection)
+                t.daemon = True
                 t.start()
                 c = 0
                 while not StompClient.IS_RUNNING:
@@ -589,8 +639,10 @@ async def update_status():
                     c += 1
                     if c > 32:
                         raise 'timeout nella connessione del socket!'
+                add_log( 'Now the stomp client is online!')
+
             except Exception as e:
-                print('errore 3 catturato! ', e)
+                add_log( 'errore 3 catturato! ', e)
 
         if not client_online:
             # if stomp_client.ws is not None and StompClient.IS_RUNNING:
@@ -604,6 +656,7 @@ async def update_status():
         else:
             stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='True')
             stomp_client.ws.send(stomp)
+            add_log( '/app/setOnline/  TRUE!')
 
             # if not thread_get_commands_online:
             #     start_thread_get_list_commands()
@@ -645,7 +698,9 @@ async def update_status():
             stomp = stomper.send(dest="/app/updatePcStatus/" + token + "/" + pcName,
                                  msg=''.join(str(x) + "~" for x in msg)[0:-1])
             stomp_client.ws.send(stomp)
-            # print("pcStatus sent through Socket!")
+            add_log( '/app/updatePcStatus/')
+
+            # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+"pcStatus sent through Socket!")
 
             # params = {
             #     'token': token,
@@ -653,10 +708,12 @@ async def update_status():
             # }
 
             # response = requests.post(url, headers=headers, params=params, data=json.dumps(data))
-            # print(response.content)
+            # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+response.content)
 
 
 def upload_wattage_entries():
+    global log
+
     url = web + '/uploadWattageEntries'
     headers = {
         'Content-type': 'application/json',
@@ -670,10 +727,12 @@ def upload_wattage_entries():
 
     response = requests.post(url, headers=headers, params=params, data=json.dumps(wattage_entries))
     wattage_entries = []
-    print(response.content)
+    add_log( response.content.decode('utf-8'))
 
 
 def get_wattage_data():
+    global log
+
     battery = psutil.sensors_battery()
     global battery_perc, battery_plugged, battery_left
     battery_perc = battery.percent
@@ -695,6 +754,7 @@ def get_wattage_data():
 
 
 def get_pc_data():
+    global log
     battery = psutil.sensors_battery()
     global battery_perc, battery_plugged, battery_left
     battery_perc = battery.percent
@@ -704,23 +764,24 @@ def get_pc_data():
 
     global cpu_usage, ram_usage, disk_usage, gpu_usage, gpu_temp
     cpu_usage = int(psutil.cpu_percent())
-    gpu = get_gpu()
-    gpu_usage = int(gpu.load * 100)
-    gpu_temp = int(gpu.temperature)
+    # gpu = get_gpu()
+    # gpu_usage = int(gpu.load * 100)
+    # gpu_temp = int(gpu.temperature)
     ram_usage = int(psutil.virtual_memory().percent)
     disk_usage = int(psutil.disk_usage('C:').percent)
 
-    global wifi
-    lines = list(filter(None, os.popen("netsh interface show interface").read().splitlines()))
-    wifi = not lines[-1].lower().__contains__("dis")
-    wifi = True
+    # global wifi
+    # lines = list(filter(None, os.popen("netsh interface show interface").read().splitlines()))
+    # wifi = not lines[-1].lower().__contains__("dis")
+    # wifi = True
 
-    global volume
+    global volume, volume_interface
     volume = get_volume()
 
     global brightness
     brightness = screen_brightness_control.get_brightness()[0]
 
+    add_log( 'get_pc_data gotten!')
     # global is_locked
     # if (datetime.utcnow() - is_locked_last).total_seconds() > 12:
     #     is_locked = is_system_locked()
@@ -737,7 +798,7 @@ def get_volume():
 def int_to_db(value):
     if value == 0:
         return -63.5
-    return max(-63.5, math.log(value) * 13.7888 - 63.5)
+    return maxStomps(-63.5, math.log(value) * 13.7888 - 63.5)
 
 
 def db_to_int(value):
@@ -786,6 +847,7 @@ def set_night_light(value):
 
 
 def check_sored_data_or_validate():
+    global log
     path = userpaths.get_local_appdata() + '\MrPowerManager'
     if not os.path.exists(path):
         os.makedirs(path)
@@ -795,6 +857,7 @@ def check_sored_data_or_validate():
     else:
         f = open(path + '\config.dat', "r")
         values = f.readline().split("@@@")
+        add_log( 'config.dat = ' + str(values))
         f.close()
         global token, pcName
         token = values[0]
@@ -805,6 +868,8 @@ def check_sored_data_or_validate():
 # ================================================================================================================
 
 def shutdown():
+    stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+    stomp_client.ws.send(stomp)
     return os.system("shutdown /s /t 1")
 
 
@@ -817,6 +882,8 @@ def logout():
 
 
 def suspend():
+    stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+    stomp_client.ws.send(stomp)
     priv_flags = (win32security.TOKEN_ADJUST_PRIVILEGES |
                   win32security.TOKEN_QUERY)
     hToken = win32security.OpenProcessToken(
@@ -836,6 +903,8 @@ def suspend():
 
 
 def hibernate():
+    stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+    stomp_client.ws.send(stomp)
     hibernate = True
     """Puts Windows to Suspend/Sleep/Standby or Hibernate.
 
@@ -936,6 +1005,8 @@ class Command:
 
 
 def request_password_encrypted(name):
+    global log
+
     url = web + '/login'
     headers = {
         'Content-type': 'application/json',
@@ -954,6 +1025,8 @@ def request_password_encrypted(name):
 
 
 def request_key():
+    global log
+
     url = web + '/requestKey'
     headers = {
         'Content-type': 'application/json',
@@ -977,27 +1050,29 @@ def unlock_pc():
 
 
 def run_at(wait, command):
-    print("im waiting " + str(wait) + "secs")
+    add_log( "im waiting " + str(wait) + "secs")
     time.sleep(wait)
     execute_command(command)
 
 
 def execute_command(command):
+    global log
+
     #   TODO both date should be utc
     global last_streaming_start, last_webcam_start
-    # print("command found! ---> " + command.command)
+    # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+"command found! ---> " + command.command)
     if command.is_scheduled:
         secs = int((datetime.utcnow() - command.scheduleDate).total_seconds())
-        print(" need to wait " + str(secs) + "sec")
+        add_log( " need to wait " + str(secs) + "sec")
         if secs > 60:
             return
         elif secs <= -60:
-            print(secs)
+            add_log( secs)
             Thread(target=run_at, args=[abs(secs), command]).start()
             return
 
     if command.command == "SOUND_VALUE":
-        print(command.value)
+        add_log( command.value)
         set_volume(int(command.value))
     elif command.command == "BRIGHTNESS_VALUE":
         set_brightness(int(command.value))
@@ -1010,10 +1085,21 @@ def execute_command(command):
             set_brightness(min(100, get_brightness()[0] + 10))
             pyautogui.sleep(0.05)
     elif command.command == "SLEEP":
+        stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+        stomp_client.ws.send(stomp)
+        add_log('/app/setOnline/  FALSE!')
+
         suspend()
     elif command.command == "HIBERNATE":
+        stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+        stomp_client.ws.send(stomp)
+        add_log('/app/setOnline/  FALSE!')
+
         hibernate()
     elif command.command == "SHUTDOWN":
+        stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+        stomp_client.ws.send(stomp)
+        add_log('/app/setOnline/  FALSE!')
         shutdown()
     elif command.command == "LOCK":
         # global is_locked, is_locked_last
@@ -1089,7 +1175,7 @@ def execute_command(command):
 
     elif "KEYBOARD" in command.command:
         to_hold = list(filter(None, command.command.split('@@@')[1].split(':')))
-        print('to_hold=' + str(to_hold))
+        add_log( 'to_hold=' + str(to_hold))
 
         if (len(to_hold) == 0):
             pyautogui.hotkey(command.command.split('@@@')[2])
@@ -1102,7 +1188,7 @@ def execute_command(command):
         # for key in to_hold:
         #     pyautogui.keyDown(key)
         #     pyautogui.sleep(0.01)
-        # print('to_press=' + command.command.split('@@@')[2])
+        # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+'to_press=' + command.command.split('@@@')[2])
         # pyautogui.press()
         # for key in to_hold:
         #     pyautogui.keyUp(key)
@@ -1124,7 +1210,7 @@ def execute_command(command):
     elif "STREAMING_QUALITY" in command.command:
         global STREAMING_QUALITY
         STREAMING_QUALITY = 10 + 70 * 0.01 * float(command.command.split('@@@')[1])
-        print('quality=' + str(STREAMING_QUALITY))
+        add_log( 'quality=' + str(STREAMING_QUALITY))
 
     elif "RECORD_SECONDS" in command.command:
         args = command.command.split('@@@')
@@ -1174,7 +1260,7 @@ def execute_command(command):
             if window._get_window_text() == command.command.split('@@@')[1]:
                 window.close()
     elif "WINDOW_FOCUS" in command.command:
-        print("TASK_MANAGER_FOCUS")
+        add_log( "TASK_MANAGER_FOCUS")
         for window in open_windows:
             if window._get_window_text() == command.command.split('@@@')[1]:
                 window.set_focus()
@@ -1203,7 +1289,7 @@ def request_end_command(id):
 
 def get_list_commands():
     while True:
-        print("Polling STARTED...")
+        add_log( "Polling STARTED...")
         polling2.poll(
             lambda: (datetime.now() - last_client_online).seconds > 40 or
                     request_available_commands().status_code == 200,
@@ -1212,15 +1298,15 @@ def get_list_commands():
             poll_forever=True)
 
         if (datetime.now() - last_client_online).seconds > 40:
-            print("Polling STOPPED... client offline!")
+            add_log( "Polling STOPPED... client offline!")
             global thread_get_commands_online
             thread_get_commands_online = False
             return
         else:
-            print("Polling STOPPED... found commands!")
+            add_log( "Polling STOPPED... found commands!")
             response_dict = dict(available_commands_response.json())
             if 'pc not found' in response_dict['result']:
-                print("pc does not exit")
+                add_log( "pc does not exit")
                 path = userpaths.get_local_appdata() + '\MrPowerManager'
                 os.remove(path + '\config.dat')
                 global force_exit
@@ -1263,6 +1349,7 @@ def start_thread_get_list_commands():
 
 
 async def main():
+    global log
     # event_schedule.enter(1, 1, update_status)
     # event_schedule.run()
     try:
@@ -1272,7 +1359,8 @@ async def main():
 
         await task1
     except Exception as e:
-        print('errore 2 catturato! ', e)
+        add_log( 'errore 2 catturato! '+ str(e))
+        main()
         raise e
 
 
@@ -1293,6 +1381,7 @@ def get_gpu(index=0):
 # ===========================================================================================
 
 def initialize_and_go():
+    global log
     check_sored_data_or_validate()
 
     StompClient.DESTINATIONS = [
@@ -1305,14 +1394,21 @@ def initialize_and_go():
                                                                            pcName) + "/message",
     ]
 
+    global volume, volume_interface
+    start = time.time_ns()
     devices = AudioUtilities.GetSpeakers()
     interface = devices.Activate(
         IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    global volume_interface, wifi_interface
     volume_interface = cast(interface, POINTER(IAudioEndpointVolume))
+    add_log( 'volume_interface set, took = ' + str(
+        (time.time_ns() - start) / 1000000) + ' ms')
+    add_log( ', its sound value is = ' + str(
+        volume_interface.GetMasterVolumeLevel))
 
+    global wifi_interface
     lines = list(filter(None, os.popen("netsh interface show interface").read().splitlines()))
     wifi_interface = (lines[-1].split(" ")[-1])
+    add_log( 'wifi_interface = ' + wifi_interface)
 
     asyncio.run(main())
     # if not admin.isUserAdmin():
@@ -1322,27 +1418,28 @@ def initialize_and_go():
 def print_battery_status():
     batts1 = c.CIM_Battery(Caption='Portable Battery')
     for i, b in enumerate(batts1):
-        print('Battery %d Design Capacity: %d mWh' % (i, b.DesignCapacity or 0))
+        add_log( 'Battery %d Design Capacity: %d mWh' % (
+        i, b.DesignCapacity or 0))
 
     batts = t.ExecQuery('Select * from BatteryFullChargedCapacity')
     for i, b in enumerate(batts):
-        print('Battery %d Fully Charged Capacity: %d mWh' %
-              (i, b.FullChargedCapacity))
+        add_log( 'Battery %d Fully Charged Capacity: %d mWh' %
+                (i, b.FullChargedCapacity))
 
     batts = t.ExecQuery('Select * from BatteryStatus where Voltage > 0')
     for i, b in enumerate(batts):
-        print('\nBattery %d ***************' % i)
-        print('Tag:               ' + str(b.Tag))
-        print('Name:              ' + b.InstanceName)
-        print('PowerOnline:       ' + str(b.PowerOnline))
-        print('Discharging:       ' + str(b.Discharging))
-        print('Charging:          ' + str(b.Charging))
-        print('Voltage:           ' + str(b.Voltage))
-        print('DischargeRate:     ' + str(b.DischargeRate))
-        print('ChargeRate:        ' + str(b.ChargeRate))
-        print('RemainingCapacity: ' + str(b.RemainingCapacity))
-        print('Active:            ' + str(b.Active))
-        print('Critical:          ' + str(b.Critical))
+        add_log( '\nBattery %d ***************' % i)
+        add_log( 'Tag:               ' + str(b.Tag))
+        add_log( 'Name:              ' + b.InstanceName)
+        add_log( 'PowerOnline:       ' + str(b.PowerOnline))
+        add_log( 'Discharging:       ' + str(b.Discharging))
+        add_log( 'Charging:          ' + str(b.Charging))
+        add_log( 'Voltage:           ' + str(b.Voltage))
+        add_log( 'DischargeRate:     ' + str(b.DischargeRate))
+        add_log( 'ChargeRate:        ' + str(b.ChargeRate))
+        add_log( 'RemainingCapacity: ' + str(b.RemainingCapacity))
+        add_log( 'Active:            ' + str(b.Active))
+        add_log( 'Critical:          ' + str(b.Critical))
 
 
 file_to_send_path = ''
@@ -1355,13 +1452,13 @@ force_block = False
 
 
 def update_progress_label():
-    v=0
-    if(len(file_to_send_path)>1 and (time.time_ns()-send_start)>100000000):
-        size=os.path.getsize(filename=file_to_send_path)/1024
-        current=size*pb['value']/100
-        time_s=(time.time_ns()-send_start)/1000000000.0
-        v=current/time_s
-    return f"{pb['value']}% {round(v,0)} kB/s" if pb['value'] > 0 else ""
+    v = 0
+    if (len(file_to_send_path) > 1 and (time.time_ns() - send_start) > 100000000):
+        size = os.path.getsize(filename=file_to_send_path) / 1024
+        current = size * pb['value'] / 100
+        time_s = (time.time_ns() - send_start) / 1000000000.0
+        v = current / time_s
+    return f"{pb['value']}% {round(v, 0)} kB/s" if pb['value'] > 0 else ""
 
 
 def progress(val):
@@ -1393,53 +1490,53 @@ def on_exit(icon, item):
 
         with open(file_path, "rb") as file:
             base64_file = base64.b64encode(file.read()).decode("utf-8")
-            send_base64(base64_file, 'FILE_FROM_SERVER:' + file_path.split('/')[-1],wait=0.015)
+            send_base64(base64_file, 'FILE_FROM_SERVER:' + file_path.split('/')[-1], wait=0.015)
     elif str(item) == 'Send file to phone [drag&drop]':
 
         def drop(event):
             global file_to_send_path, var
-            # print(event.data)
+            # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+event.data)
             # files = str(event.data)[0:-1].split('} ')
 
-            final_files=[]
-            final_file=''
+            final_files = []
+            final_file = ''
 
-            in_bracket=False
+            in_bracket = False
             for letter in event.data:
-                if(letter!='{'):
+                if (letter != '{'):
                     if letter == '}':
                         in_bracket = False
                         final_files.append(final_file)
-                        final_file=''
+                        final_file = ''
                     else:
-                        if letter==' ' and not in_bracket:
-                            if len(final_file)>1:
+                        if letter == ' ' and not in_bracket:
+                            if len(final_file) > 1:
                                 final_files.append(final_file)
-                            final_file=''
+                            final_file = ''
                         else:
-                            final_file+=letter
+                            final_file += letter
                 else:
-                    in_bracket=True
-            if len(final_file)>1:
+                    in_bracket = True
+            if len(final_file) > 1:
                 final_files.append(final_file)
 
-            # print(str(final_files))
+            # log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+str(final_files))
 
-            #file_to_send_path = str(files[-1])[1:]
+            # file_to_send_path = str(files[-1])[1:]
             # formatted=''
             # for file in files:
             # formatted = str(files[-1])[1:].split('/')[-1]
             file_to_send_path = final_files[-1]
-            formatted=final_files[-1].split('/')[-1]
+            formatted = final_files[-1].split('/')[-1]
             var.set(formatted)
 
         def send():
-            global file_to_send_path,var_button,force_block
+            global file_to_send_path, var_button, force_block
             if file_to_send_path != '':
                 if pb['value'] > 0.01:
-                    if pb['value']!=100:
+                    if pb['value'] != 100:
                         force_block = True
-                    value_label['text']=''
+                    value_label['text'] = ''
                     var_button.set('SendFile')
                     pb['value'] = 0
                     return
@@ -1458,16 +1555,16 @@ def on_exit(icon, item):
 
                     Thread(target=send_base64,
                            args=[base64_file, 'FILE_FROM_SERVER:' +
-                                 file_to_send_path.split('/')[-1],True,0.015]).start()
+                                 file_to_send_path.split('/')[-1], True, 0.012]).start()
 
         ws = tkdnd.Tk()
         ws.title('Drag&Drop file')
         ws.geometry('500x360')
         ws.config(bg='#fcba03')
 
-        global var,var_button
+        global var, var_button
         var = tk.StringVar()
-        var_button=tk.StringVar(value='SendFile')
+        var_button = tk.StringVar(value='SendFile')
         tk.Label(ws, text='Path of the Folder', bg='#fcba03', font=font.Font(family='Helvetica'), ).pack(anchor=tk.NW,
                                                                                                          padx=10)
         e_box = tk.Entry(ws, textvar=var, width=80, font=font.Font(family='Helvetica', size=15))
@@ -1521,6 +1618,21 @@ def on_exit(icon, item):
         button.pack(pady=10)
 
         ws.mainloop()
+    elif str(item) == 'Log':
+        path = userpaths.get_local_appdata() + '\MrPowerManager\\logs\\'
+        if not os.path.exists(path):
+            os.makedirs(path)
+        path += 'log ' + datetime.now().strftime("%Y-%m-%d %H-%M-%S") + '.txt'
+        with open(path, 'w') as write:
+            global log
+            write.write(log)
+
+        webbrowser.open(path)
+    elif str(item) =='Restart socket':
+        stomp_client.ws.close()
+        t = Thread(target=stomp_client.create_connection)
+        t.daemon = True
+        t.start()
 
 
 def start_tray():
@@ -1529,12 +1641,19 @@ def start_tray():
         PIL.Image.open('icon.ico'),
         menu=pystray.Menu(
             pystray.MenuItem(
+                'Log', on_exit
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
                 'Send file to phone [file selector]', on_exit
             ),
             pystray.MenuItem(
                 'Send file to phone [drag&drop]', on_exit
             ),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                'Restart socket', on_exit
+            ),
             pystray.MenuItem(
                 'Exit', on_exit
             ),
@@ -1543,7 +1662,9 @@ def start_tray():
 
 
 if __name__ == '__main__':
+    log += (datetime.now().strftime("%H-%M-%S") + ' -> ' + 'starting tray thread...')
     Thread(target=start_tray).start()
+    add_log( 'tray thread started')
     initialize_and_go()
 
     # win32gui.EnumWindows(winEnumHandler, None)
@@ -1595,4 +1716,4 @@ if __name__ == '__main__':
 
 
 # except Exception as e:
-#     print("errore catturato! ", e)
+#     log+=('\n'+datetime.now().strftime("%H-%M-%S")+' -> '+"errore catturato! ", e)
