@@ -9,7 +9,9 @@ import os
 import queue
 import re
 import sched
+import sys
 import time
+from fernet import FernetCipher
 import tkinter as tk
 import tkinter.font as font
 import webbrowser
@@ -50,8 +52,6 @@ from dragonfly import Window
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 # ws_uri = "ws://localhost:5000/chat/websocket"
 from pynput.keyboard import Controller
-
-from fernet import FernetCipher
 
 # ===========================================================================================
 # ===========================================================================================
@@ -1383,7 +1383,8 @@ def is_system_locked():
 
 
 def get_gpu(index=0):
-    return GPUtil.getGPUs()[index]
+    gpus=GPUtil.getGPUs()
+    return gpus[index]
 
 
 # ===========================================================================================
@@ -1405,10 +1406,10 @@ def initialize_and_go():
     add_log( ', its sound value is = ' + str(
         volume_interface.GetMasterVolumeLevel))
 
-    global wifi_interface
-    lines = list(filter(None, os.popen("netsh interface show interface").read().splitlines()))
-    wifi_interface = (lines[-1].split(" ")[-1])
-    add_log( 'wifi_interface = ' + wifi_interface)
+    # global wifi_interface
+    # lines = list(filter(None, os.popen("netsh interface show interface").read().splitlines()))
+    # wifi_interface = (lines[-1].split(" ")[-1])
+    # add_log( 'wifi_interface = ' + wifi_interface)
 
     asyncio.run(main())
     # if not admin.isUserAdmin():
@@ -1472,6 +1473,8 @@ def progress(val):
 
 def on_exit(icon, item):
     if str(item) == 'Exit':
+        stomp = stomper.send(dest="/app/setOnline/" + token + "/" + pcName, msg='False')
+        stomp_client.ws.send(stomp)
         global force_exit
         force_exit = True
         # sys.exit(1)
@@ -1644,9 +1647,11 @@ def on_exit(icon, item):
 
 
 def start_tray():
+    # icon_folder = os.path.join(sys._MEIPASS, 'icon')
+    # icon_path=icon_folder + "\icon.ico"
     pystray.Icon(
         'MrPowerManagerServer',
-        PIL.Image.open('icon.ico'),
+        Image.open("icon.ico"),
         menu=pystray.Menu(
             pystray.MenuItem(
                 'Log', on_exit
