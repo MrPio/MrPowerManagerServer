@@ -18,9 +18,10 @@ class Ui_MainWindow(object):
 
     def validate(self, event):
         code = self.lineEdit.text()
-        if code.__len__() != 6:
+        if code.__len__() < 1:
             return
         response = self.send_request(code)
+        print(response['result'])
         if response['result'].__contains__("not found"):
             ctypes.windll.user32.MessageBoxW(0, "This code doesn't exists!", "Wrong code", 0)
             return

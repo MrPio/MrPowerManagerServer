@@ -37,7 +37,7 @@ def list_files(path):
 
 
 def dropbox_download_file(local_file_path, dropbox_file_path):
-    # about 1 sec
+    # this method takes about 1 sec
     path = userpaths.get_local_appdata() + '\MrPowerManager' + local_file_path
 
     try:

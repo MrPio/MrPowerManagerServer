@@ -35,7 +35,7 @@ import pystray
 import requests
 import screen_brightness_control
 import stomper
-import tkdnd
+import tkinterDnD as tkdnd
 import userpaths
 import websocket
 import win32api
@@ -73,7 +73,7 @@ class StompClient(object):
 
     # Do note that in this case we use jwt_token for authentication hence we are
     # passing the same in the headers, else we can pass encoded passwords etc.
-    def __init__(self, jwt_token):
+    def __init__(self,token,pcName, jwt_token):
         """
         Initializer for the class.
         Args:
@@ -83,6 +83,15 @@ class StompClient(object):
                             connection.
           destinations(list): List of topics which we want to subscribe to.
         """
+        StompClient.DESTINATIONS=[
+            "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
+                                                                               pcName) + "/commands",
+
+            "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/online",
+
+            "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
+                                                                               pcName) + "/message",
+            ]
         self.NOTIFICATIONS = queue.Queue()
         if jwt_token is not None:
             self.headers = {"Authorization": "Bearer " + jwt_token}
@@ -302,7 +311,7 @@ win_ver = 11
 
 event_schedule = sched.scheduler(time.time, time.sleep)
 
-stomp_client = StompClient(None)
+stomp_client = None
 # websocket_sender = websocket.create_connection(ws_uri)
 
 collect_wattage_in_background = True
@@ -853,7 +862,7 @@ def check_sored_data_or_validate():
         os.makedirs(path)
 
     if not Path(path + '\config.dat').is_file():
-        exec(open("validate_code.py").read())
+        exec(open("validate_code.py").read(),globals())
     else:
         f = open(path + '\config.dat', "r")
         values = f.readline().split("@@@")
@@ -1381,18 +1390,9 @@ def get_gpu(index=0):
 # ===========================================================================================
 
 def initialize_and_go():
-    global log
+    global log,stomp_client
     check_sored_data_or_validate()
-
-    StompClient.DESTINATIONS = [
-        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
-                                                                           pcName) + "/commands",
-
-        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/online",
-
-        "/server/" + re.sub('[^a-zA-Z0-9 \n.]', '_', token) + "/" + re.sub('[^a-zA-Z0-9 \n.]', '_',
-                                                                           pcName) + "/message",
-    ]
+    stomp_client=StompClient(token,pcName,None)
 
     global volume, volume_interface
     start = time.time_ns()
@@ -1477,8 +1477,8 @@ def on_exit(icon, item):
         # sys.exit(1)
         os._exit(1)
     elif str(item) == 'Send file to phone [file selector]':
-        # root = tk.Tk()
-        # root.withdraw()
+        root = tk.Tk()
+        root.withdraw()
 
         file_path = filedialog.askopenfilename()
         if file_path == '':
@@ -1633,6 +1633,14 @@ def on_exit(icon, item):
         t = Thread(target=stomp_client.create_connection)
         t.daemon = True
         t.start()
+    elif str(item)=='Brightness + 10':
+        set_brightness(min(100, get_brightness()[0] + 10))
+    elif str(item)=='Brightness - 10':
+        set_brightness(max(0, get_brightness()[0] - 10))
+    elif str(item)=='Brightness MAX':
+        set_brightness(100)
+    elif str(item)=='Brightness MIN':
+        set_brightness(0)
 
 
 def start_tray():
@@ -1654,6 +1662,21 @@ def start_tray():
             pystray.MenuItem(
                 'Restart socket', on_exit
             ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                'Brightness + 10', on_exit
+            ),
+            pystray.MenuItem(
+                'Brightness - 10', on_exit
+            ),
+            pystray.MenuItem(
+                'Brightness MAX', on_exit
+            ),
+            pystray.MenuItem(
+                'Brightness MIN', on_exit
+            ),
+            pystray.Menu.SEPARATOR,
+
             pystray.MenuItem(
                 'Exit', on_exit
             ),
@@ -1665,6 +1688,9 @@ if __name__ == '__main__':
     log += (datetime.now().strftime("%H-%M-%S") + ' -> ' + 'starting tray thread...')
     Thread(target=start_tray).start()
     add_log( 'tray thread started')
+
+    c=requests.get(web+ '/', headers={}, params={})
+
     initialize_and_go()
 
     # win32gui.EnumWindows(winEnumHandler, None)
