@@ -16,5 +16,5 @@
 
 > Repository for the android app (***still not published... but it works!***):
 >
-> *https://github.com/MrPio/MrPowerManagerClient/edit/master/README.md*
+> *https://github.com/MrPio/MrPowerManagerClient*
 ----------------------------------------------------------------------------------------------------------------------------------------
